@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace brainstem {
 
@@ -31,6 +32,80 @@ struct Velocity {
   double yaw_rps{0.0};
 };
 
+struct Vector3 {
+  double x{0.0};
+  double y{0.0};
+  double z{0.0};
+};
+
+struct Quaternion {
+  double w{1.0};
+  double x{0.0};
+  double y{0.0};
+  double z{0.0};
+};
+
+struct ImuSample {
+  Vector3 angular_velocity_rps;
+  Quaternion orientation;
+  std::chrono::nanoseconds elapsed{0};
+};
+
+struct JointState {
+  std::uint32_t id{0};
+  double position_rad{0.0};
+  double velocity_rps{0.0};
+  double torque_nm{0.0};
+  std::uint32_t status_code{0};
+};
+
+struct JointSample {
+  std::vector<JointState> joints;
+  std::chrono::nanoseconds elapsed{0};
+};
+
+enum class CmsStateKind {
+  Unknown,
+  Zero,
+  Grounded,
+  Standing,
+  Walking,
+  Transitioning,
+};
+
+enum class CmsTransition {
+  None,
+  StandUp,
+  SitDown,
+  Gesture,
+};
+
+struct CmsState {
+  CmsStateKind kind{CmsStateKind::Unknown};
+  CmsTransition transition{CmsTransition::None};
+  std::string gesture_name;
+};
+
+struct MotorState {
+  std::uint32_t id{0};
+  bool online{false};
+  std::uint32_t status_code{0};
+  double temperature_c{0.0};
+  double voltage_v{0.0};
+  double position_rad{0.0};
+  double velocity_rps{0.0};
+  double torque_nm{0.0};
+  std::vector<std::uint32_t> errors;
+};
+
+struct MotorStatus {
+  std::vector<MotorState> motors;
+};
+
+struct Voltage {
+  std::vector<double> values_v;
+};
+
 struct ControlState {
   bool connected{false};
   bool ready{false};
@@ -40,6 +115,8 @@ struct ControlState {
   bool initial_zero_acknowledged{false};
   std::uint32_t lease_remaining_ms{0};
   std::uint64_t accepted_sequence{0};
+  std::uint64_t accepted_count{0};
+  std::uint64_t rejected_count{0};
   std::string fsm{"unknown"};
   std::string reason{"not_connected"};
   std::string control_owner{"none"};
@@ -57,6 +134,12 @@ struct Result {
   [[nodiscard]] bool confirmsStop() const noexcept {
     return ok && transport_ok && accepted && stop_confirmed && !state.ready && !state.lease_valid;
   }
+};
+
+template <typename T>
+struct Response {
+  Result result;
+  T value;
 };
 
 }  // namespace brainstem

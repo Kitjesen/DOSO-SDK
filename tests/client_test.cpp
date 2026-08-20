@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "brainstem_api/cms.grpc.pb.h"
@@ -46,6 +48,103 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     std::lock_guard<std::mutex> lock(mutex_);
     ++status_calls_;
     fillStatus(*response);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetCmsState(grpc::ServerContext *, const google::protobuf::Empty *,
+                           brainstem::api::v1::CmsState *response) override {
+    response->set_kind(brainstem::api::v1::CMS_STATE_KIND_TRANSITIONING);
+    response->set_transition(brainstem::api::v1::CMS_TRANSITION_KIND_GESTURE);
+    response->set_gesture_name("wave");
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetMotorStatus(grpc::ServerContext *, const google::protobuf::Empty *,
+                              brainstem::api::v1::MotorStatusResponse *response) override {
+    auto *motor = response->add_motors();
+    motor->set_id(15);
+    motor->set_online(true);
+    motor->set_status_code(7);
+    motor->set_temperature(42.5);
+    motor->set_voltage(23.8);
+    motor->set_position(1.25);
+    motor->set_velocity(-0.75);
+    motor->set_torque(3.5);
+    motor->add_errors(9);
+    motor->add_errors(11);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetVoltage(grpc::ServerContext *, const google::protobuf::Empty *,
+                          brainstem::api::v1::Voltage *response) override {
+    response->add_values(23.1);
+    response->add_values(23.2);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListenImu(grpc::ServerContext *context, const google::protobuf::Empty *,
+                         grpc::ServerWriter<brainstem::api::v1::Imu> *writer) override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (hold_imu_stream_) {
+        imu_stream_open_ = true;
+        imu_condition_.notify_all();
+        lock.unlock();
+        while (!context->IsCancelled()) {
+          std::this_thread::sleep_for(1ms);
+        }
+        return grpc::Status::OK;
+      }
+    }
+    brainstem::api::v1::Imu sample;
+    sample.mutable_gyroscope()->set_x(1.0);
+    sample.mutable_gyroscope()->set_y(-2.0);
+    sample.mutable_gyroscope()->set_z(3.5);
+    sample.mutable_quaternion()->set_w(0.5);
+    sample.mutable_quaternion()->set_x(0.1);
+    sample.mutable_quaternion()->set_y(0.2);
+    sample.mutable_quaternion()->set_z(0.3);
+    sample.mutable_timestamp()->set_seconds(12);
+    sample.mutable_timestamp()->set_nanos(345);
+    writer->Write(sample);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListenJoint(grpc::ServerContext *, const google::protobuf::Empty *,
+                           grpc::ServerWriter<brainstem::api::v1::Joint> *writer) override {
+    brainstem::api::v1::Joint all_sample;
+    auto *all = all_sample.mutable_all_joints();
+    for (std::uint32_t index = 0; index < 16; ++index) {
+      all->mutable_position()->add_values(static_cast<double>(index) + 0.1);
+      all->mutable_velocity()->add_values(static_cast<double>(index) + 0.2);
+      all->mutable_torque()->add_values(static_cast<double>(index) + 0.3);
+      all->mutable_status()->add_values(index + 100);
+    }
+    all_sample.mutable_timestamp()->set_seconds(5);
+    writer->Write(all_sample);
+
+    brainstem::api::v1::Joint single_sample;
+    auto *single = single_sample.mutable_single_joint();
+    single->set_id(7);
+    single->set_position(-1.0);
+    single->set_velocity(-2.0);
+    single->set_torque(-3.0);
+    single->set_status(707);
+    single_sample.mutable_timestamp()->set_nanos(99);
+    writer->Write(single_sample);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListenCmsState(grpc::ServerContext *, const google::protobuf::Empty *,
+                              grpc::ServerWriter<brainstem::api::v1::CmsState> *writer) override {
+    brainstem::api::v1::CmsState standing;
+    standing.set_kind(brainstem::api::v1::CMS_STATE_KIND_STANDING);
+    writer->Write(standing);
+
+    brainstem::api::v1::CmsState transitioning;
+    transitioning.set_kind(brainstem::api::v1::CMS_STATE_KIND_TRANSITIONING);
+    transitioning.set_transition(brainstem::api::v1::CMS_TRANSITION_KIND_SIT_DOWN);
+    writer->Write(transitioning);
     return grpc::Status::OK;
   }
 
@@ -252,6 +351,16 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     drop_ack_attempts_ = 2;
   }
 
+  void holdImuStream() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hold_imu_stream_ = true;
+  }
+
+  bool waitForImuStream() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return imu_condition_.wait_for(lock, 2s, [&] { return imu_stream_open_; });
+  }
+
  private:
   void fillStatus(brainstem::api::v1::ControlStatus &status) const {
     status.mutable_fsm()->set_kind(brainstem::api::v1::CMS_STATE_KIND_STANDING);
@@ -265,11 +374,14 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     status.set_ready_for_walk(true);
     status.set_owner_id(lease_active_ ? client_id_ : "");
     status.set_last_accepted_sequence(last_accepted_sequence_);
+    status.set_accepted_count(12);
+    status.set_rejected_count(3);
   }
 
   static constexpr const char *kToken = "test-token";
 
   mutable std::mutex mutex_;
+  std::condition_variable imu_condition_;
   std::string client_id_;
   bool lease_active_{false};
   bool preempted_{false};
@@ -277,6 +389,8 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
   bool reject_preserving_lease_next_{false};
   bool mismatch_next_ack_{false};
   bool fail_next_release_{false};
+  bool hold_imu_stream_{false};
+  bool imu_stream_open_{false};
   unsigned drop_ack_attempts_{0};
   std::uint64_t retry_sequence_{0};
   std::uint64_t last_accepted_sequence_{0};
@@ -338,8 +452,142 @@ void testConnectReadsServerState() {
   check(result.state.motors_enabled, "connect must decode motor output state");
   check(result.state.fsm == "standing", "connect must decode the FSM");
   check(result.state.control_owner == "none", "connect must decode the control owner");
+  check(result.state.accepted_count == 12 && result.state.rejected_count == 3,
+        "connect must expose command counters");
   check(!result.state.ready, "connect alone must not claim a control lease");
   check(server.service().statusCalls() == 1, "connect must read status exactly once");
+}
+
+void testCmsStateSnapshotUsesPublicTypes() {
+  TestServer server;
+  brainstem::Client client(server.config());
+
+  const brainstem::Response<brainstem::CmsState> response = client.getCmsState();
+  check(response.result.ok && response.result.transport_ok,
+        "CMS state snapshot must report transport success");
+  check(!response.result.accepted, "CMS state snapshot is not a command acceptance");
+  check(response.value.kind == brainstem::CmsStateKind::Transitioning,
+        "CMS state kind must be mapped");
+  check(response.value.transition == brainstem::CmsTransition::Gesture,
+        "CMS transition must be mapped");
+  check(response.value.gesture_name == "wave", "CMS gesture name must be preserved");
+}
+
+void testMotorStatusSnapshotPreservesDiagnostics() {
+  TestServer server;
+  brainstem::Client client(server.config());
+
+  const brainstem::Response<brainstem::MotorStatus> response = client.getMotorStatus();
+  check(response.result.ok && response.value.motors.size() == 1,
+        "motor status snapshot must expose returned motors");
+  const brainstem::MotorState &motor = response.value.motors.front();
+  check(motor.id == 15 && motor.online && motor.status_code == 7,
+        "motor identity and status must be preserved");
+  close(motor.temperature_c, 42.5, "motor temperature");
+  close(motor.voltage_v, 23.8, "motor voltage");
+  close(motor.position_rad, 1.25, "motor position");
+  close(motor.velocity_rps, -0.75, "motor velocity");
+  close(motor.torque_nm, 3.5, "motor torque");
+  check(motor.errors == std::vector<std::uint32_t>({9, 11}), "motor errors must be preserved");
+}
+
+void testVoltageSnapshotPreservesJointOrder() {
+  TestServer server;
+  brainstem::Client client(server.config());
+
+  const brainstem::Response<brainstem::Voltage> response = client.getVoltage();
+  check(response.result.ok, "voltage snapshot must succeed");
+  check(response.value.values_v == std::vector<double>({23.1, 23.2}),
+        "voltage values must preserve protocol order");
+}
+
+void testImuSubscriptionMapsOneCompleteSample() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  brainstem::ImuSample received;
+  bool called = false;
+
+  std::unique_ptr<brainstem::Subscription> subscription =
+      client.subscribeImu([&](const brainstem::ImuSample &sample) {
+        received = sample;
+        called = true;
+      });
+  const brainstem::Result finished = subscription->wait();
+
+  check(finished.ok && called, "IMU subscription must deliver and finish cleanly");
+  close(received.angular_velocity_rps.x, 1.0, "IMU gyro x");
+  close(received.angular_velocity_rps.y, -2.0, "IMU gyro y");
+  close(received.angular_velocity_rps.z, 3.5, "IMU gyro z");
+  close(received.orientation.w, 0.5, "IMU quaternion w");
+  close(received.orientation.x, 0.1, "IMU quaternion x");
+  close(received.orientation.y, 0.2, "IMU quaternion y");
+  close(received.orientation.z, 0.3, "IMU quaternion z");
+  check(received.elapsed == std::chrono::seconds(12) + std::chrono::nanoseconds(345),
+        "IMU timestamp must preserve duration precision");
+}
+
+void testSubscriptionCancellationStopsAStreamingRpc() {
+  TestServer server;
+  server.service().holdImuStream();
+  brainstem::Client client(server.config());
+  bool called = false;
+  std::unique_ptr<brainstem::Subscription> subscription =
+      client.subscribeImu([&](const brainstem::ImuSample &) { called = true; });
+
+  check(server.service().waitForImuStream(), "blocking IMU stream must start");
+  check(subscription->active(), "live stream must report active");
+  subscription->cancel();
+  const brainstem::Result finished = subscription->wait();
+
+  check(finished.ok && finished.transport_ok, "explicit cancellation must finish cleanly");
+  check(!subscription->active(), "cancelled stream must report inactive");
+  check(!called, "cancelled empty stream must not invent a sample");
+}
+
+void testJointSubscriptionMapsSnapshotsAndSingleUpdates() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  std::vector<brainstem::JointSample> received;
+
+  std::unique_ptr<brainstem::Subscription> subscription = client.subscribeJoints(
+      [&](const brainstem::JointSample &sample) { received.push_back(sample); });
+  const brainstem::Result finished = subscription->wait();
+
+  check(finished.ok && received.size() == 2,
+        "joint subscription must deliver both protocol shapes");
+  check(received[0].joints.size() == 16, "all-joints sample must preserve all 16 joints");
+  check(received[0].joints.front().id == 0 && received[0].joints.back().id == 15,
+        "all-joints sample must assign protocol-order ids");
+  close(received[0].joints[15].position_rad, 15.1, "all-joints position");
+  close(received[0].joints[15].velocity_rps, 15.2, "all-joints velocity");
+  close(received[0].joints[15].torque_nm, 15.3, "all-joints torque");
+  check(received[0].joints[15].status_code == 115, "all-joints status");
+  check(received[0].elapsed == 5s, "all-joints timestamp");
+
+  check(received[1].joints.size() == 1 && received[1].joints[0].id == 7,
+        "single-joint update must preserve its id");
+  close(received[1].joints[0].position_rad, -1.0, "single-joint position");
+  close(received[1].joints[0].velocity_rps, -2.0, "single-joint velocity");
+  close(received[1].joints[0].torque_nm, -3.0, "single-joint torque");
+  check(received[1].joints[0].status_code == 707, "single-joint status");
+  check(received[1].elapsed == 99ns, "single-joint timestamp");
+}
+
+void testCmsStateSubscriptionUsesTheSnapshotMapping() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  std::vector<brainstem::CmsState> received;
+
+  std::unique_ptr<brainstem::Subscription> subscription = client.subscribeCmsState(
+      [&](const brainstem::CmsState &state) { received.push_back(state); });
+  const brainstem::Result finished = subscription->wait();
+
+  check(finished.ok && received.size() == 2, "CMS subscription must deliver all state changes");
+  check(received[0].kind == brainstem::CmsStateKind::Standing,
+        "CMS subscription must map standing");
+  check(received[1].kind == brainstem::CmsStateKind::Transitioning &&
+            received[1].transition == brainstem::CmsTransition::SitDown,
+        "CMS subscription must map transition intent");
 }
 
 void testTlsNameCannotSilentlyUseAnInsecureChannel() {
@@ -634,6 +882,18 @@ void testOldServerFailsClosedWithProtocolReason() {
   check(result.error.find("AcquireControl") != std::string::npos,
         "protocol failure must name the missing RPC");
 
+  const brainstem::Response<brainstem::CmsState> cms = client.getCmsState();
+  check(!cms.result.ok && cms.result.transport_ok,
+        "missing telemetry RPC must be a protocol failure, not transport loss");
+  check(cms.result.state.reason == "protocol_incompatible",
+        "telemetry failure must preserve protocol incompatibility");
+
+  std::unique_ptr<brainstem::Subscription> imu =
+      client.subscribeImu([](const brainstem::ImuSample &) {});
+  const brainstem::Result stream = imu->wait();
+  check(!stream.ok && stream.transport_ok && stream.state.reason == "protocol_incompatible",
+        "missing stream RPC must preserve protocol incompatibility");
+
   server->Shutdown();
   server->Wait();
 }
@@ -695,6 +955,13 @@ void testMutualTlsControlPath() {
 int main() {
   try {
     testConnectReadsServerState();
+    testCmsStateSnapshotUsesPublicTypes();
+    testMotorStatusSnapshotPreservesDiagnostics();
+    testVoltageSnapshotPreservesJointOrder();
+    testImuSubscriptionMapsOneCompleteSample();
+    testSubscriptionCancellationStopsAStreamingRpc();
+    testJointSubscriptionMapsSnapshotsAndSingleUpdates();
+    testCmsStateSubscriptionUsesTheSnapshotMapping();
     testTlsNameCannotSilentlyUseAnInsecureChannel();
     testClientIdentityMustBeExplicit();
     testInsecureTransportRequiresExplicitOptIn();

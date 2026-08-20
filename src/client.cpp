@@ -3,10 +3,13 @@
 #include <google/protobuf/empty.pb.h>
 #include <grpcpp/grpcpp.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <functional>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -130,6 +133,16 @@ Result rpcFailure(const grpc::Status &status, const char *rpc_name) {
   return result;
 }
 
+Result withCachedState(Result failure, const ControlState &cached_state) {
+  const bool connected = failure.state.connected;
+  std::string reason = std::move(failure.state.reason);
+  failure.state = cached_state;
+  failure.state.connected = connected;
+  failure.state.ready = false;
+  failure.state.reason = std::move(reason);
+  return failure;
+}
+
 std::string fsmName(const ApiStatus &status) {
   if (!status.has_fsm()) {
     return "unknown";
@@ -175,6 +188,110 @@ std::string reasonName(RejectReason reason) {
   return name.empty() ? "unknown" : name;
 }
 
+CmsState decodeCmsState(const api::v1::CmsState &source) {
+  CmsState state;
+  switch (source.kind()) {
+    case api::v1::CMS_STATE_KIND_ZERO:
+      state.kind = CmsStateKind::Zero;
+      break;
+    case api::v1::CMS_STATE_KIND_GROUNDED:
+      state.kind = CmsStateKind::Grounded;
+      break;
+    case api::v1::CMS_STATE_KIND_STANDING:
+      state.kind = CmsStateKind::Standing;
+      break;
+    case api::v1::CMS_STATE_KIND_WALKING:
+      state.kind = CmsStateKind::Walking;
+      break;
+    case api::v1::CMS_STATE_KIND_TRANSITIONING:
+      state.kind = CmsStateKind::Transitioning;
+      break;
+    default:
+      state.kind = CmsStateKind::Unknown;
+      break;
+  }
+  switch (source.transition()) {
+    case api::v1::CMS_TRANSITION_KIND_STAND_UP:
+      state.transition = CmsTransition::StandUp;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_SIT_DOWN:
+      state.transition = CmsTransition::SitDown;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_GESTURE:
+      state.transition = CmsTransition::Gesture;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_NONE:
+    default:
+      state.transition = CmsTransition::None;
+      break;
+  }
+  state.gesture_name = source.gesture_name();
+  return state;
+}
+
+MotorStatus decodeMotorStatus(const api::v1::MotorStatusResponse &source) {
+  MotorStatus status;
+  status.motors.reserve(static_cast<std::size_t>(source.motors_size()));
+  for (const auto &source_motor : source.motors()) {
+    MotorState motor;
+    motor.id = source_motor.id();
+    motor.online = source_motor.online();
+    motor.status_code = source_motor.status_code();
+    motor.temperature_c = source_motor.temperature();
+    motor.voltage_v = source_motor.voltage();
+    motor.position_rad = source_motor.position();
+    motor.velocity_rps = source_motor.velocity();
+    motor.torque_nm = source_motor.torque();
+    motor.errors.assign(source_motor.errors().begin(), source_motor.errors().end());
+    status.motors.push_back(std::move(motor));
+  }
+  return status;
+}
+
+std::chrono::nanoseconds decodeDuration(const google::protobuf::Duration &source) {
+  return std::chrono::seconds(source.seconds()) + std::chrono::nanoseconds(source.nanos());
+}
+
+ImuSample decodeImu(const api::v1::Imu &source) {
+  ImuSample sample;
+  sample.angular_velocity_rps = {source.gyroscope().x(), source.gyroscope().y(),
+                                 source.gyroscope().z()};
+  sample.orientation = {source.quaternion().w(), source.quaternion().x(), source.quaternion().y(),
+                        source.quaternion().z()};
+  sample.elapsed = decodeDuration(source.timestamp());
+  return sample;
+}
+
+JointSample decodeJoint(const api::v1::Joint &source) {
+  JointSample sample;
+  sample.elapsed = decodeDuration(source.timestamp());
+  if (source.has_single_joint()) {
+    const api::v1::SingleJoint &source_joint = source.single_joint();
+    sample.joints.push_back({source_joint.id(), source_joint.position(), source_joint.velocity(),
+                             source_joint.torque(), source_joint.status()});
+    return sample;
+  }
+  if (!source.has_all_joints()) {
+    throw std::runtime_error("ListenJoint: sample contains no joint data");
+  }
+
+  const api::v1::AllJoints &source_joints = source.all_joints();
+  const int count = source_joints.position().values_size();
+  if (count != 16 || source_joints.velocity().values_size() != count ||
+      source_joints.torque().values_size() != count ||
+      source_joints.status().values_size() != count) {
+    throw std::runtime_error("ListenJoint: all-joints sample must contain 16 aligned values");
+  }
+  sample.joints.reserve(static_cast<std::size_t>(count));
+  for (int index = 0; index < count; ++index) {
+    sample.joints.push_back(
+        {static_cast<std::uint32_t>(index), source_joints.position().values(index),
+         source_joints.velocity().values(index), source_joints.torque().values(index),
+         source_joints.status().values(index)});
+  }
+  return sample;
+}
+
 ControlState decodeStatus(const ApiStatus &status, RejectReason reason, const Config &config,
                           bool connected, bool has_lease_token, bool initial_zero_acknowledged) {
   ControlState state;
@@ -187,6 +304,8 @@ ControlState decodeStatus(const ApiStatus &status, RejectReason reason, const Co
   state.initial_zero_acknowledged = initial_zero_acknowledged;
   state.lease_remaining_ms = status.lease_remaining_ms();
   state.accepted_sequence = status.last_accepted_sequence();
+  state.accepted_count = status.accepted_count();
+  state.rejected_count = status.rejected_count();
   state.fsm = fsmName(status);
   state.reason = reasonName(reason);
   state.control_owner = ownerName(status.owner());
@@ -280,6 +399,115 @@ struct Client::Impl {
     return failure;
   }
 };
+
+struct Subscription::Impl {
+  explicit Impl(std::function<Result(Impl &)> operation) {
+    worker = std::thread([this, operation = std::move(operation)]() mutable {
+      try {
+        result = operation(*this);
+      } catch (const std::exception &error) {
+        result.state.reason = "subscription_error";
+        result.error = error.what();
+      } catch (...) {
+        result.state.reason = "subscription_error";
+        result.error = result.state.reason;
+      }
+      clearContext();
+      is_active.store(false);
+    });
+  }
+
+  ~Impl() {
+    cancel();
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+
+  grpc::ClientContext *beginContext() {
+    std::lock_guard<std::mutex> lock(context_mutex);
+    context = std::make_unique<grpc::ClientContext>();
+    if (cancel_requested.load()) {
+      context->TryCancel();
+    }
+    return context.get();
+  }
+
+  void clearContext() noexcept {
+    std::lock_guard<std::mutex> lock(context_mutex);
+    context.reset();
+  }
+
+  void cancel() noexcept {
+    cancel_requested.store(true);
+    std::lock_guard<std::mutex> lock(context_mutex);
+    if (context) {
+      context->TryCancel();
+    }
+  }
+
+  Result wait() {
+    if (worker.joinable()) {
+      worker.join();
+    }
+    return result;
+  }
+
+  template <typename WireSample, typename Handler, typename Start, typename Decode>
+  Result runStream(const std::shared_ptr<grpc::Channel> &channel, const ControlState &state,
+                   Handler &handler, Start start, Decode decode, const char *rpc_name) {
+    const auto stub = api::v1::RobotControl::NewStub(channel);
+    google::protobuf::Empty request;
+    grpc::ClientContext *stream_context = beginContext();
+    std::unique_ptr<grpc::ClientReader<WireSample>> reader = start(*stub, stream_context, request);
+    WireSample wire_sample;
+    while (reader->Read(&wire_sample)) {
+      const auto sample = decode(wire_sample);
+      try {
+        handler(sample);
+      } catch (...) {
+        cancel();
+        throw;
+      }
+    }
+    const grpc::Status status = reader->Finish();
+    if (status.ok() || cancel_requested.load()) {
+      return {true, true, false, false, state, {}};
+    }
+    return withCachedState(rpcFailure(status, rpc_name), state);
+  }
+
+  std::atomic_bool is_active{true};
+  std::atomic_bool cancel_requested{false};
+  std::mutex context_mutex;
+  std::unique_ptr<grpc::ClientContext> context;
+  Result result;
+  std::thread worker;
+};
+
+Subscription::Subscription(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+Subscription::~Subscription() = default;
+Subscription::Subscription(Subscription &&) noexcept = default;
+Subscription &Subscription::operator=(Subscription &&) noexcept = default;
+
+void Subscription::cancel() noexcept {
+  if (impl_) {
+    impl_->cancel();
+  }
+}
+
+bool Subscription::active() const noexcept { return impl_ && impl_->is_active.load(); }
+
+Result Subscription::wait() {
+  if (!impl_) {
+    Result result;
+    result.state.reason = "subscription_missing";
+    result.error = result.state.reason;
+    return result;
+  }
+  return impl_->wait();
+}
 
 Client::Client(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {}
 
@@ -652,6 +880,108 @@ Result Client::bodyAction(bool stand) {
   state.reason = std::string("body_action_accepted:") + (stand ? "stand_up" : "sit_down");
   impl_->last_state = state;
   return {true, true, true, false, state, {}};
+}
+
+Response<CmsState> Client::getCmsState() {
+  google::protobuf::Empty request;
+  api::v1::CmsState response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetCmsState(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetCmsState"), impl_->last_state), {}};
+  }
+  return {{true, true, false, false, impl_->last_state, {}}, decodeCmsState(response)};
+}
+
+Response<MotorStatus> Client::getMotorStatus() {
+  google::protobuf::Empty request;
+  api::v1::MotorStatusResponse response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetMotorStatus(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetMotorStatus"), impl_->last_state), {}};
+  }
+  return {{true, true, false, false, impl_->last_state, {}}, decodeMotorStatus(response)};
+}
+
+Response<Voltage> Client::getVoltage() {
+  google::protobuf::Empty request;
+  api::v1::Voltage response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetVoltage(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetVoltage"), impl_->last_state), {}};
+  }
+  Voltage voltage;
+  voltage.values_v.assign(response.values().begin(), response.values().end());
+  return {{true, true, false, false, impl_->last_state, {}}, std::move(voltage)};
+}
+
+std::unique_ptr<Subscription> Client::subscribeImu(std::function<void(const ImuSample &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("IMU subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::Imu>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) { return stub.ListenImu(context, request); },
+        decodeImu, "ListenImu");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
+}
+
+std::unique_ptr<Subscription> Client::subscribeJoints(
+    std::function<void(const JointSample &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("joint subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::Joint>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) { return stub.ListenJoint(context, request); },
+        decodeJoint, "ListenJoint");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
+}
+
+std::unique_ptr<Subscription> Client::subscribeCmsState(
+    std::function<void(const CmsState &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("CMS state subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::CmsState>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) {
+          return stub.ListenCmsState(context, request);
+        },
+        decodeCmsState, "ListenCmsState");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
 }
 
 ControlState Client::state() const { return impl_ ? impl_->last_state : ControlState{}; }

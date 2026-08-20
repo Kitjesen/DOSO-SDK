@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Added typed CMS-state, motor-diagnostic, and voltage snapshot queries.
+- Added cancellable CMS-state, IMU, and joint-state subscriptions without
+  exposing gRPC or Protobuf in public headers.
+- Preserved both Brainstem joint stream forms: 16-joint snapshots and
+  single-joint updates.
+- Added accepted/rejected command counters to the normalized control state.
+
 ## 0.1.0
 
 - Added the DOSO SDK Brainstem C++ autonomous-motion client.

@@ -18,8 +18,8 @@ private gRPC/Protobuf implementation
        Brainstem Server
 ```
 
-This repository currently contains the C++ autonomous-motion client, not every
-Brainstem service API.
+This repository contains the C++ autonomous-motion and robot-telemetry client.
+It intentionally exposes domain types rather than every raw Brainstem RPC.
 
 ## Supported API
 
@@ -50,12 +50,43 @@ The first release deliberately keeps the public surface small:
   `result.confirmsStop()` means both operations were confirmed.
 - `standUp()` and `sitDown()` stop and release locomotion first if this client
   owns the lease, then submit the posture action.
+- `getCmsState()`, `getMotorStatus()`, and `getVoltage()` read typed snapshots.
+- `subscribeCmsState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
+  cancellable telemetry streams.
 - `state()` returns the most recently decoded state without network I/O.
 
 `move()` enforces the Server's 20 ms minimum checked-command interval. A lost
 ACK is retried once with the same sequence and payload, matching the Server's
 idempotency contract. Preemption, a rejected sequence, or a failed lease renewal
 invalidates local motion readiness.
+
+## Telemetry
+
+The SDK currently returns these public types:
+
+| API | Information |
+| --- | --- |
+| `connect()` / `state()` | Connectivity, readiness, FSM, motor enable/fault, lease owner and remaining time, command sequence, accepted/rejected counts. |
+| `getCmsState()` / `subscribeCmsState()` | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
+| `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
+| `getVoltage()` | Voltage values in Brainstem protocol order. |
+| `subscribeImu()` | Body-frame angular velocity, orientation quaternion, and session-relative timestamp. |
+| `subscribeJoints()` | Position, velocity, torque, status, joint ID, and session-relative timestamp; both 16-joint snapshots and single-joint updates are preserved. |
+
+Subscriptions own one worker thread and one Server stream. The callback runs on
+that worker thread. Cancellation and completion are explicit:
+
+```cpp
+auto imu = client.subscribeImu([](const brainstem::ImuSample &sample) {
+  // Keep this callback short; hand off the sample to your own queue if needed.
+});
+
+imu->cancel();
+brainstem::Result finished = imu->wait();
+```
+
+Destroying a subscription also cancels and joins it. Read-only telemetry does
+not acquire the locomotion lease.
 
 ## Result model
 
@@ -75,11 +106,15 @@ only `ok`.
 
 ## Control lease and identity
 
-The client is serialized: call it from one control loop, or serialize calls in
-the application. There is no hidden heartbeat thread. Call `refresh()` before
-`state.lease_remaining_ms` reaches zero; accepted `move()` calls also renew the
-Server lease. Lease expiry and remote-control preemption stop the Brainstem
-motion path and make the client not ready.
+The motion client is serialized: call motion methods from one control loop, or
+serialize them in the application. There is no hidden lease heartbeat. A lease
+is a short-lived exclusive token proving that this client owns the locomotion
+path; it prevents navigation, a test tool, and a remote controller from sending
+competing velocity commands. Call `refresh()` before
+`state.lease_remaining_ms` reaches zero; accepted `move()` calls also renew it.
+The Brainstem 2.1 default is 300 ms. Lease expiry or remote-control preemption
+zeros the Brainstem motion path and makes the client not ready. `stop()` first
+sends a checked zero command and then releases the lease.
 
 `Config::client_id` is required. On hardware it must exactly match the
 authenticated certificate principal configured by the Brainstem Server, using
@@ -101,6 +136,7 @@ and isolated tests. Production remote motion uses mutual TLS.
 | `StopMove()` | confirmed checked-zero plus lease release |
 | `StandUp()` | `standUp()` |
 | `Sit()` | `sitDown()` |
+| typed state subscriptions | CMS, IMU, and joint subscriptions |
 | SDK error code | `Result` and `ControlState` |
 
 ## Build, test, and install
@@ -167,13 +203,17 @@ the example then enables the SDK's explicit insecure-development opt-in.
 
 ## Current limits
 
-- No background status stream yet; `connect()` reads one snapshot.
-- No IMU, joint, gesture, profile, camera, or motor-diagnostic facade yet.
+- Brainstem inference history, robot parameters, and profile management do not
+  yet have public DOSO SDK facades.
+- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.1 and
+  therefore do not come from this SDK.
+- Gesture and speed-mode RPC names exist in the protocol, but Brainstem Server
+  currently returns `UNIMPLEMENTED`; they are not advertised as SDK features.
 - No recover-stand or damping action because Brainstem Server does not yet
   define those remote RPCs.
 - `standUp()` and `sitDown()` confirm RPC acceptance, not physical completion.
 - The client destructor performs a best-effort stop and may wait up to the
   configured RPC timeout when it still owns a lease.
 
-The SDK version is `0.1.0`; its bundled protocol contract is `brainstem_api`
+The SDK version is `0.2.0`; its bundled protocol contract is `brainstem_api`
 `2.1.0`.
