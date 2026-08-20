@@ -109,9 +109,12 @@ Ubuntu dependencies:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake protobuf-compiler \
+sudo apt-get install -y build-essential cmake pkg-config protobuf-compiler \
   protobuf-compiler-grpc libprotobuf-dev libgrpc++-dev
 ```
+
+CMake accepts either the upstream gRPC package configuration or Debian/Ubuntu's
+`grpc++.pc` pkg-config metadata.
 
 Build a clean checkout:
 

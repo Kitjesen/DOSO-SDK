@@ -18,6 +18,7 @@ jobs:
             cmake \
             libgrpc++-dev \
             libprotobuf-dev \
+            pkg-config \
             protobuf-compiler \
             protobuf-compiler-grpc
 

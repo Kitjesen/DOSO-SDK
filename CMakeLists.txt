@@ -13,7 +13,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Protobuf REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
+find_package(gRPC CONFIG QUIET)
+if(NOT gRPC_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
+    add_library(gRPC::grpc++ ALIAS PkgConfig::GRPC)
+endif()
 find_package(Threads REQUIRED)
 
 set(BRAINSTEM_API_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/protocol")
