@@ -59,6 +59,13 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status GetStartTime(grpc::ServerContext *, const google::protobuf::Empty *,
+                            google::protobuf::Timestamp *response) override {
+    response->set_seconds(1700000000);
+    response->set_nanos(123456789);
+    return grpc::Status::OK;
+  }
+
   grpc::Status GetMotorStatus(grpc::ServerContext *, const google::protobuf::Empty *,
                               brainstem::api::v1::MotorStatusResponse *response) override {
     auto *motor = response->add_motors();
@@ -82,10 +89,49 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status Enable(grpc::ServerContext *, const google::protobuf::Empty *,
+                      google::protobuf::Empty *) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++enable_calls_;
+    motors_enabled_ = true;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Disable(grpc::ServerContext *, const google::protobuf::Empty *,
+                       google::protobuf::Empty *) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++disable_calls_;
+    motors_enabled_ = false;
+    lease_active_ = false;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status SetZero(grpc::ServerContext *, const google::protobuf::Empty *,
+                       google::protobuf::Empty *) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++set_zero_calls_;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ClearMotorFault(grpc::ServerContext *,
+                               const brainstem::api::v1::ClearFaultRequest *request,
+                               google::protobuf::Empty *) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++clear_fault_calls_;
+    cleared_joint_ids_.assign(request->joint_ids().begin(), request->joint_ids().end());
+    lease_active_ = false;
+    if (cleared_joint_ids_.empty()) {
+      motors_enabled_ = false;
+    }
+    return grpc::Status::OK;
+  }
+
   grpc::Status ListenImu(grpc::ServerContext *context, const google::protobuf::Empty *,
                          grpc::ServerWriter<brainstem::api::v1::Imu> *writer) override {
+    bool include_acceleration = true;
     {
       std::unique_lock<std::mutex> lock(mutex_);
+      include_acceleration = include_imu_acceleration_;
       if (hold_imu_stream_) {
         imu_stream_open_ = true;
         imu_condition_.notify_all();
@@ -100,6 +146,11 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     sample.mutable_gyroscope()->set_x(1.0);
     sample.mutable_gyroscope()->set_y(-2.0);
     sample.mutable_gyroscope()->set_z(3.5);
+    if (include_acceleration) {
+      sample.mutable_linear_acceleration()->set_x(0.5);
+      sample.mutable_linear_acceleration()->set_y(-1.0);
+      sample.mutable_linear_acceleration()->set_z(9.75);
+    }
     sample.mutable_quaternion()->set_w(0.5);
     sample.mutable_quaternion()->set_x(0.1);
     sample.mutable_quaternion()->set_y(0.2);
@@ -299,6 +350,31 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     return sit_calls_;
   }
 
+  [[nodiscard]] unsigned enableCalls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return enable_calls_;
+  }
+
+  [[nodiscard]] unsigned disableCalls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return disable_calls_;
+  }
+
+  [[nodiscard]] unsigned setZeroCalls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return set_zero_calls_;
+  }
+
+  [[nodiscard]] unsigned clearFaultCalls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return clear_fault_calls_;
+  }
+
+  [[nodiscard]] std::vector<std::uint32_t> clearedJointIds() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cleared_joint_ids_;
+  }
+
   [[nodiscard]] std::string clientId() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return client_id_;
@@ -356,6 +432,11 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     hold_imu_stream_ = true;
   }
 
+  void omitImuAcceleration() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    include_imu_acceleration_ = false;
+  }
+
   bool waitForImuStream() {
     std::unique_lock<std::mutex> lock(mutex_);
     return imu_condition_.wait_for(lock, 2s, [&] { return imu_stream_open_; });
@@ -364,7 +445,7 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
  private:
   void fillStatus(brainstem::api::v1::ControlStatus &status) const {
     status.mutable_fsm()->set_kind(brainstem::api::v1::CMS_STATE_KIND_STANDING);
-    status.set_motor_output_enabled(true);
+    status.set_motor_output_enabled(motors_enabled_);
     status.set_owner(lease_active_ ? brainstem::api::v1::CONTROL_OWNER_GRPC
                                    : (preempted_ ? brainstem::api::v1::CONTROL_OWNER_YUNZHUO
                                                  : brainstem::api::v1::CONTROL_OWNER_NONE));
@@ -390,6 +471,7 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
   bool mismatch_next_ack_{false};
   bool fail_next_release_{false};
   bool hold_imu_stream_{false};
+  bool include_imu_acceleration_{true};
   bool imu_stream_open_{false};
   unsigned drop_ack_attempts_{0};
   std::uint64_t retry_sequence_{0};
@@ -401,8 +483,14 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
   unsigned release_calls_{0};
   unsigned stand_calls_{0};
   unsigned sit_calls_{0};
+  unsigned enable_calls_{0};
+  unsigned disable_calls_{0};
+  unsigned set_zero_calls_{0};
+  unsigned clear_fault_calls_{0};
+  bool motors_enabled_{true};
   std::vector<brainstem::Velocity> velocities_;
   std::vector<std::uint64_t> walk_request_sequences_;
+  std::vector<std::uint32_t> cleared_joint_ids_;
   std::vector<std::chrono::steady_clock::time_point> accepted_at_;
 };
 
@@ -458,19 +546,32 @@ void testConnectReadsServerState() {
   check(server.service().statusCalls() == 1, "connect must read status exactly once");
 }
 
-void testCmsStateSnapshotUsesPublicTypes() {
+void testBodyStateSnapshotUsesPublicTypes() {
   TestServer server;
   brainstem::Client client(server.config());
 
-  const brainstem::Response<brainstem::CmsState> response = client.getCmsState();
+  const brainstem::Response<brainstem::BodyState> response = client.getBodyState();
   check(response.result.ok && response.result.transport_ok,
-        "CMS state snapshot must report transport success");
-  check(!response.result.accepted, "CMS state snapshot is not a command acceptance");
-  check(response.value.kind == brainstem::CmsStateKind::Transitioning,
-        "CMS state kind must be mapped");
-  check(response.value.transition == brainstem::CmsTransition::Gesture,
-        "CMS transition must be mapped");
-  check(response.value.gesture_name == "wave", "CMS gesture name must be preserved");
+        "body-state snapshot must report transport success");
+  check(!response.result.accepted, "body-state snapshot is not a command acceptance");
+  check(response.value.kind == brainstem::BodyStateKind::Transitioning,
+        "body-state kind must be mapped");
+  check(response.value.transition == brainstem::BodyTransition::Gesture,
+        "body-state transition must be mapped");
+  check(response.value.gesture_name == "wave", "body-state gesture name must be preserved");
+}
+
+void testServerStartTimePreservesUtcPrecision() {
+  TestServer server;
+  brainstem::Client client(server.config());
+
+  const auto response = client.getServerStartTime();
+  check(response.result.ok && response.result.transport_ok,
+        "server start time must report transport success");
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(response.value.time_since_epoch());
+  check(elapsed == std::chrono::seconds(1700000000) + std::chrono::nanoseconds(123456789),
+        "server start time must preserve UTC nanosecond precision");
 }
 
 void testMotorStatusSnapshotPreservesDiagnostics() {
@@ -518,6 +619,11 @@ void testImuSubscriptionMapsOneCompleteSample() {
   close(received.angular_velocity_rps.x, 1.0, "IMU gyro x");
   close(received.angular_velocity_rps.y, -2.0, "IMU gyro y");
   close(received.angular_velocity_rps.z, 3.5, "IMU gyro z");
+  check(received.linear_acceleration_mps2.has_value(),
+        "IMU sample must preserve acceleration presence");
+  close(received.linear_acceleration_mps2->x, 0.5, "IMU acceleration x");
+  close(received.linear_acceleration_mps2->y, -1.0, "IMU acceleration y");
+  close(received.linear_acceleration_mps2->z, 9.75, "IMU acceleration z");
   close(received.orientation.w, 0.5, "IMU quaternion w");
   close(received.orientation.x, 0.1, "IMU quaternion x");
   close(received.orientation.y, 0.2, "IMU quaternion y");
@@ -526,16 +632,34 @@ void testImuSubscriptionMapsOneCompleteSample() {
         "IMU timestamp must preserve duration precision");
 }
 
+void testImuSubscriptionAcceptsLegacySampleWithoutAcceleration() {
+  TestServer server;
+  server.service().omitImuAcceleration();
+  brainstem::Client client(server.config());
+  brainstem::ImuSample received;
+
+  std::unique_ptr<brainstem::Subscription> subscription =
+      client.subscribeImu([&](const brainstem::ImuSample &sample) { received = sample; });
+  const brainstem::Result finished = subscription->wait();
+
+  check(finished.ok, "legacy IMU subscription must finish cleanly");
+  check(!received.linear_acceleration_mps2.has_value(),
+        "a Brainstem 2.1 IMU sample must expose absent acceleration explicitly");
+}
+
 void testManagedTelemetryStartsOnlyRequestedStreams() {
   TestServer server;
   brainstem::Client client(server.config());
   brainstem::TelemetryOptions options;
   options.imu = true;
   options.joints = false;
-  options.cms = false;
+  options.body_state = false;
 
   const brainstem::Result started = client.startTelemetry(options);
   const brainstem::TelemetrySnapshot telemetry = client.telemetry();
+  const brainstem::ImuSnapshot direct_imu = client.latestImu();
+  const brainstem::JointSnapshot direct_joints = client.latestJoints();
+  const brainstem::BodySnapshot direct_body = client.latestBodyState();
 
   check(started.ok && started.transport_ok,
         "requested telemetry must start with an initial sample");
@@ -543,8 +667,14 @@ void testManagedTelemetryStartsOnlyRequestedStreams() {
         "managed telemetry must cache the latest IMU sample");
   check(telemetry.imu.sequence == 1, "first managed IMU sample must have sequence one");
   close(telemetry.imu.value.angular_velocity_rps.x, 1.0, "managed IMU gyro x");
+  check(direct_imu.sequence == telemetry.imu.sequence,
+        "direct IMU access must read the same managed cache");
+  check(direct_joints.valid_mask == telemetry.joints.valid_mask,
+        "direct joint access must read the same managed cache");
+  check(direct_body.available == telemetry.body.available,
+        "direct body-state access must read the same managed cache");
   check(telemetry.joints.valid_mask == 0, "disabled joint telemetry must stay empty");
-  check(!telemetry.cms.available, "disabled CMS telemetry must stay empty");
+  check(!telemetry.body.available, "disabled body-state telemetry must stay empty");
 }
 
 void testSubscriptionCancellationStopsAStreamingRpc() {
@@ -600,7 +730,7 @@ void testManagedJointTelemetryMergesSingleJointUpdates() {
   brainstem::TelemetryOptions options;
   options.imu = false;
   options.joints = true;
-  options.cms = false;
+  options.body_state = false;
 
   const brainstem::Result started = client.startTelemetry(options);
   brainstem::TelemetrySnapshot telemetry;
@@ -625,21 +755,22 @@ void testManagedJointTelemetryMergesSingleJointUpdates() {
         "single-joint update must preserve every other slot timestamp");
 }
 
-void testCmsStateSubscriptionUsesTheSnapshotMapping() {
+void testBodyStateSubscriptionUsesTheSnapshotMapping() {
   TestServer server;
   brainstem::Client client(server.config());
-  std::vector<brainstem::CmsState> received;
+  std::vector<brainstem::BodyState> received;
 
-  std::unique_ptr<brainstem::Subscription> subscription = client.subscribeCmsState(
-      [&](const brainstem::CmsState &state) { received.push_back(state); });
+  std::unique_ptr<brainstem::Subscription> subscription = client.subscribeBodyState(
+      [&](const brainstem::BodyState &state) { received.push_back(state); });
   const brainstem::Result finished = subscription->wait();
 
-  check(finished.ok && received.size() == 2, "CMS subscription must deliver all state changes");
-  check(received[0].kind == brainstem::CmsStateKind::Standing,
-        "CMS subscription must map standing");
-  check(received[1].kind == brainstem::CmsStateKind::Transitioning &&
-            received[1].transition == brainstem::CmsTransition::SitDown,
-        "CMS subscription must map transition intent");
+  check(finished.ok && received.size() == 2,
+        "body-state subscription must deliver all state changes");
+  check(received[0].kind == brainstem::BodyStateKind::Standing,
+        "body-state subscription must map standing");
+  check(received[1].kind == brainstem::BodyStateKind::Transitioning &&
+            received[1].transition == brainstem::BodyTransition::SitDown,
+        "body-state subscription must map transition intent");
 }
 
 void testManagedCmsTelemetryCachesTheLatestState() {
@@ -648,24 +779,24 @@ void testManagedCmsTelemetryCachesTheLatestState() {
   brainstem::TelemetryOptions options;
   options.imu = false;
   options.joints = false;
-  options.cms = true;
+  options.body_state = true;
 
   const brainstem::Result started = client.startTelemetry(options);
   brainstem::TelemetrySnapshot telemetry;
   for (int attempt = 0; attempt < 100; ++attempt) {
     telemetry = client.telemetry();
-    if (telemetry.cms.sequence >= 2) {
+    if (telemetry.body.sequence >= 2) {
       break;
     }
     std::this_thread::sleep_for(1ms);
   }
 
-  check(started.ok, "managed CMS telemetry must receive its initial state");
-  check(telemetry.cms.available, "managed CMS telemetry must cache a state");
-  check(telemetry.cms.sequence == 2, "every CMS state change must advance the sequence");
-  check(telemetry.cms.value.kind == brainstem::CmsStateKind::Transitioning &&
-            telemetry.cms.value.transition == brainstem::CmsTransition::SitDown,
-        "managed CMS telemetry must expose the latest transition");
+  check(started.ok, "managed body-state telemetry must receive its initial state");
+  check(telemetry.body.available, "managed body-state telemetry must cache a state");
+  check(telemetry.body.sequence == 2, "every body-state change must advance the sequence");
+  check(telemetry.body.value.kind == brainstem::BodyStateKind::Transitioning &&
+            telemetry.body.value.transition == brainstem::BodyTransition::SitDown,
+        "managed body-state telemetry must expose the latest transition");
   check(!telemetry.imu.available && telemetry.joints.valid_mask == 0,
         "unrequested managed streams must remain empty");
 }
@@ -678,7 +809,7 @@ void testManagedTelemetryMarksExpiredSamplesStale() {
   brainstem::TelemetryOptions options;
   options.imu = true;
   options.joints = false;
-  options.cms = false;
+  options.body_state = false;
 
   check(client.startTelemetry(options).ok, "managed IMU telemetry must receive an initial sample");
   std::this_thread::sleep_for(10ms);
@@ -701,8 +832,8 @@ void testStopTelemetryClearsManagedState() {
         "stopped IMU telemetry must be inactive and unavailable");
   check(!telemetry.joints.active && telemetry.joints.valid_mask == 0,
         "stopped joint telemetry must be inactive and invalid");
-  check(!telemetry.cms.active && !telemetry.cms.available,
-        "stopped CMS telemetry must be inactive and unavailable");
+  check(!telemetry.body.active && !telemetry.body.available,
+        "stopped body-state telemetry must be inactive and unavailable");
 }
 
 void testManagedTelemetryCanChangeSelection() {
@@ -711,7 +842,7 @@ void testManagedTelemetryCanChangeSelection() {
   brainstem::TelemetryOptions options;
   options.imu = true;
   options.joints = false;
-  options.cms = false;
+  options.body_state = false;
   check(client.startTelemetry(options).ok, "initial IMU selection must start");
 
   options.imu = false;
@@ -787,6 +918,71 @@ void testRefreshAcquiresLeaseAndAcknowledgesInitialZero() {
   close(velocities[0].vx_mps, 0.0, "initial zero vx");
   close(velocities[0].vy_mps, 0.0, "initial zero vy");
   close(velocities[0].yaw_rps, 0.0, "initial zero yaw");
+}
+
+void testMotorLifecycleClearsControlBeforeReenable() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  check(client.refresh().ok, "test lease must be ready");
+
+  const brainstem::Result disabled = client.disableMotors();
+  check(disabled.ok && disabled.transport_ok && disabled.accepted,
+        "motor disable must report an accepted hardware action");
+  check(!disabled.state.motors_enabled && !disabled.state.lease_valid && !disabled.state.ready,
+        "motor disable must clear local control readiness");
+  check(server.service().disableCalls() == 1, "motor disable must call the Server once");
+
+  const brainstem::Result enabled = client.enableMotors();
+  check(enabled.ok && enabled.accepted && enabled.state.motors_enabled,
+        "motor enable must update the cached motor state");
+  check(!enabled.state.lease_valid && !enabled.state.ready,
+        "motor enable must not invent a locomotion lease");
+  check(server.service().enableCalls() == 1, "motor enable must call the Server once");
+}
+
+void testJointZeroStopsLocomotionBeforeCalibration() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  check(client.refresh().ok, "test lease must be ready");
+
+  const brainstem::Result result = client.setJointZero();
+
+  check(result.ok && result.transport_ok && result.accepted,
+        "joint zero must report an accepted calibration action");
+  check(!result.state.lease_valid && !result.state.ready,
+        "joint zero must not retain locomotion readiness");
+  check(server.service().releaseCalls() == 1,
+        "joint zero must confirm stop and release before calibration");
+  check(server.service().setZeroCalls() == 1, "joint zero must call the Server once");
+}
+
+void testClearMotorFaultsTargetsRequestedJointsAndRevokesControl() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  check(client.refresh().ok, "test lease must be ready");
+
+  const brainstem::Result result = client.clearMotorFaults({2, 15});
+
+  check(result.ok && result.transport_ok && result.accepted,
+        "motor fault clear must report an accepted diagnostic action");
+  check(!result.state.lease_valid && !result.state.ready,
+        "motor fault clear must invalidate locomotion control");
+  check(server.service().clearFaultCalls() == 1, "motor fault clear must call the Server once");
+  check(server.service().clearedJointIds() == std::vector<std::uint32_t>({2, 15}),
+        "motor fault clear must preserve requested joint ids");
+}
+
+void testClearMotorFaultsRejectsInvalidJointBeforeIo() {
+  TestServer server;
+  brainstem::Client client(server.config());
+
+  const brainstem::Result result = client.clearMotorFaults({16});
+
+  check(!result.ok && !result.transport_ok && !result.accepted,
+        "invalid fault-clear joint IDs must be rejected locally");
+  check(result.state.reason == "invalid_joint_id", "invalid joint reason must be stable");
+  check(server.service().clearFaultCalls() == 0,
+        "invalid fault-clear joint IDs must not reach the Server");
 }
 
 void testMatchingClientIdDoesNotImplyLocalLeaseOwnership() {
@@ -1023,7 +1219,7 @@ void testOldServerFailsClosedWithProtocolReason() {
   check(result.error.find("AcquireControl") != std::string::npos,
         "protocol failure must name the missing RPC");
 
-  const brainstem::Response<brainstem::CmsState> cms = client.getCmsState();
+  const brainstem::Response<brainstem::BodyState> cms = client.getBodyState();
   check(!cms.result.ok && cms.result.transport_ok,
         "missing telemetry RPC must be a protocol failure, not transport loss");
   check(cms.result.state.reason == "protocol_incompatible",
@@ -1096,15 +1292,17 @@ void testMutualTlsControlPath() {
 int main() {
   try {
     testConnectReadsServerState();
-    testCmsStateSnapshotUsesPublicTypes();
+    testBodyStateSnapshotUsesPublicTypes();
+    testServerStartTimePreservesUtcPrecision();
     testMotorStatusSnapshotPreservesDiagnostics();
     testVoltageSnapshotPreservesJointOrder();
     testImuSubscriptionMapsOneCompleteSample();
+    testImuSubscriptionAcceptsLegacySampleWithoutAcceleration();
     testManagedTelemetryStartsOnlyRequestedStreams();
     testSubscriptionCancellationStopsAStreamingRpc();
     testJointSubscriptionMapsSnapshotsAndSingleUpdates();
     testManagedJointTelemetryMergesSingleJointUpdates();
-    testCmsStateSubscriptionUsesTheSnapshotMapping();
+    testBodyStateSubscriptionUsesTheSnapshotMapping();
     testManagedCmsTelemetryCachesTheLatestState();
     testManagedTelemetryMarksExpiredSamplesStale();
     testStopTelemetryClearsManagedState();
@@ -1113,6 +1311,10 @@ int main() {
     testClientIdentityMustBeExplicit();
     testInsecureTransportRequiresExplicitOptIn();
     testRefreshAcquiresLeaseAndAcknowledgesInitialZero();
+    testMotorLifecycleClearsControlBeforeReenable();
+    testJointZeroStopsLocomotionBeforeCalibration();
+    testClearMotorFaultsTargetsRequestedJointsAndRevokesControl();
+    testClearMotorFaultsRejectsInvalidJointBeforeIo();
     testMatchingClientIdDoesNotImplyLocalLeaseOwnership();
     testMoveUsesPhysicalUnitsAndCheckedSequence();
     testRefreshRenewsWithoutRepeatingInitialZero();

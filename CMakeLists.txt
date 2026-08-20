@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(DOSOSDK VERSION 0.3.0 LANGUAGES CXX)
+project(DOSOSDK VERSION 0.4.0 LANGUAGES CXX)
 
 include(CTest)
 include(CMakePackageConfigHelpers)
@@ -113,6 +113,12 @@ endif()
 if(BRAINSTEM_BUILD_EXAMPLES)
     add_executable(brainstem_motion_example examples/motion.cpp)
     target_link_libraries(brainstem_motion_example PRIVATE brainstem::client)
+
+    add_executable(brainstem_telemetry_example examples/telemetry.cpp)
+    target_link_libraries(brainstem_telemetry_example PRIVATE brainstem::client)
+
+    add_executable(brainstem_maintenance_example examples/maintenance.cpp)
+    target_link_libraries(brainstem_maintenance_example PRIVATE brainstem::client)
 endif()
 
 configure_package_config_file(

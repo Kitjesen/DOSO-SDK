@@ -50,10 +50,15 @@ The public surface deliberately stays small:
   `result.confirmsStop()` means both operations were confirmed.
 - `standUp()` and `sitDown()` stop and release locomotion first if this client
   owns the lease, then submit the posture action.
-- `getCmsState()`, `getMotorStatus()`, and `getVoltage()` read typed snapshots.
+- `enableMotors()`, `disableMotors()`, `setJointZero()`, and
+  `clearMotorFaults()` expose authenticated hardware maintenance operations.
+- `getServerStartTime()`, `getBodyState()`, `getMotorStatus()`, and
+  `getVoltage()` perform typed request/response reads.
 - `startTelemetry()`, `telemetry()`, and `stopTelemetry()` manage selected
   background streams and expose one thread-safe latest-value snapshot.
-- `subscribeCmsState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
+- `latestImu()`, `latestJoints()`, and `latestBodyState()` copy one selected
+  cache directly; none of these getters perform network I/O.
+- `subscribeBodyState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
   cancellable raw streams for callers that need every frame.
 - `state()` returns the most recently decoded state without network I/O.
 
@@ -73,13 +78,14 @@ alongside the serialized motion-control loop.
 brainstem::TelemetryOptions options;
 options.imu = true;
 options.joints = true;
-options.cms = false;
+options.body_state = false;
 
 brainstem::Result started = client.startTelemetry(options);
 if (started.ok) {
   brainstem::TelemetrySnapshot snapshot = client.telemetry();
   if (snapshot.imu.available && snapshot.imu.fresh) {
     const auto angular_velocity = snapshot.imu.value.angular_velocity_rps;
+    const auto linear_acceleration = snapshot.imu.value.linear_acceleration_mps2;
   }
   if (snapshot.joints.complete() && snapshot.joints.fresh()) {
     const brainstem::JointState &front_right_hip = snapshot.joints.joints[0];
@@ -89,9 +95,9 @@ if (started.ok) {
 client.stopTelemetry();
 ```
 
-`startTelemetry()` defaults to IMU, joints, and CMS. Calling it again applies a
-new selection: disabled streams are cancelled and inactive selected streams are
-restarted. `active` reports whether the Server stream is still running;
+`startTelemetry()` defaults to IMU, joints, and body state. Calling it again
+applies a new selection: disabled streams are cancelled and inactive selected
+streams are restarted. `active` reports whether the Server stream is still running;
 `available` and the joint `valid_mask` report whether cached data may be read.
 IMU `age`/`fresh` and the joint `fresh_mask` use
 `Config::telemetry_stale_after`, which defaults to 500 ms.
@@ -102,9 +108,15 @@ populates all slots; later single-joint messages update only their own slot.
 `complete()` before assuming all 16 positions are known.
 
 Motor temperature, per-motor voltage, faults, and aggregate voltage are
-request/response data in `brainstem_api` 2.1, not streams. Read them when needed
+request/response data in `brainstem_api` 2.2, not streams. Read them when needed
 with `getMotorStatus()` and `getVoltage()`; they do not require
 `startTelemetry()` or a locomotion lease.
+
+The IMU cache contains body-frame angular velocity in rad/s, an orientation
+quaternion in `w/x/y/z` order, and session-relative elapsed time. With a 2.2
+Server it also contains body-frame linear acceleration in m/s². The acceleration
+is an `std::optional`: it is empty when connected to a compatible older Server
+that does not send field 4.
 
 ## Telemetry reference
 
@@ -113,10 +125,11 @@ The SDK currently returns these public types:
 | API | Information |
 | --- | --- |
 | `connect()` / `state()` | Connectivity, readiness, FSM, motor enable/fault, lease owner and remaining time, command sequence, accepted/rejected counts. |
-| `getCmsState()` / managed or raw CMS stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
+| `getServerStartTime()` | Brainstem process start time as a UTC `system_clock::time_point`; use it to detect a Server restart and invalidate session-relative assumptions. |
+| `getBodyState()` / managed or raw body-state stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
 | `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
 | `getVoltage()` | Voltage values in Brainstem protocol order. |
-| managed or raw IMU stream | Body-frame angular velocity, orientation quaternion, and session-relative timestamp. |
+| managed or raw IMU stream | Body-frame angular velocity in rad/s, optional linear acceleration in m/s², orientation quaternion, and session-relative timestamp. |
 | managed or raw joint stream | Position, velocity, torque, status, joint ID, and session-relative timestamp; full snapshots and single-joint updates are merged by the managed cache. |
 
 For advanced per-frame processing, each raw subscription owns one worker thread
@@ -145,7 +158,7 @@ Every network operation returns `brainstem::Result`:
 | `transport_ok` | The RPC reached the Server and produced an application-level response. |
 | `accepted` | The Server accepted the request; it does not imply a physical posture transition completed. |
 | `stop_confirmed` | Checked zero and lease release were both confirmed. |
-| `state` | Latest normalized control state. |
+| `state` | Latest unified control state. |
 | `error` | Stable reason details for logging and diagnostics. |
 
 Use `confirmsStop()` for safety-sensitive stop decisions rather than checking
@@ -159,7 +172,7 @@ is a short-lived exclusive token proving that this client owns the locomotion
 path; it prevents navigation, a test tool, and a remote controller from sending
 competing velocity commands. Call `refresh()` before
 `state.lease_remaining_ms` reaches zero; accepted `move()` calls also renew it.
-The Brainstem 2.1 default is 300 ms. Lease expiry or remote-control preemption
+The Brainstem 2.2 default is 300 ms. Lease expiry or remote-control preemption
 zeros the Brainstem motion path and makes the client not ready. `stop()` first
 sends a checked zero command and then releases the lease.
 
@@ -183,7 +196,7 @@ and isolated tests. Production remote motion uses mutual TLS.
 | `StopMove()` | confirmed checked-zero plus lease release |
 | `StandUp()` | `standUp()` |
 | `Sit()` | `sitDown()` |
-| typed state subscriptions | CMS, IMU, and joint subscriptions |
+| typed state subscriptions | body-state, IMU, and joint subscriptions |
 | SDK error code | `Result` and `ControlState` |
 
 ## Build, test, and install
@@ -226,7 +239,7 @@ find_package(BrainstemClient CONFIG REQUIRED)
 target_link_libraries(my_robot PRIVATE brainstem::client)
 ```
 
-The repository vendors the exact `brainstem_api` 2.1 input files used for code
+The repository vendors the exact `brainstem_api` 2.2 input files used for code
 generation under `protocol/`; consumers do not need the Brainstem monorepo or a
 protocol submodule.
 
@@ -248,14 +261,45 @@ always requests a confirmed stop at the end.
 Omit the final three TLS paths only for an explicitly insecure local Server;
 the example then enables the SDK's explicit insecure-development opt-in.
 
+## Telemetry example
+
+The telemetry example opens only read-only streams. It prints changed IMU,
+joint-cache, and body-state snapshots for the requested duration and never
+acquires the locomotion lease:
+
+```bash
+./build/brainstem_telemetry_example \
+  192.168.123.18:13145 observer@robot 5000 \
+  /etc/brainstem/tls/ca.crt \
+  /etc/brainstem/tls/observer.crt \
+  /etc/brainstem/tls/observer.key
+```
+
+## Maintenance example
+
+Maintenance commands change robot hardware state and therefore require an
+authenticated actuator principal. `clear-faults` with no IDs clears all faults
+and the current Server disables the motors; `clear-faults:2,15` targets only the
+listed joints.
+
+```bash
+./build/brainstem_maintenance_example \
+  192.168.123.18:13145 maintenance@robot clear-faults:2,15 \
+  /etc/brainstem/tls/ca.crt \
+  /etc/brainstem/tls/maintenance.crt \
+  /etc/brainstem/tls/maintenance.key
+```
+
+Available commands are `enable`, `disable`, `set-zero`, `clear-faults`,
+`clear-faults:<ids>`, `stand-up`, and `sit-down`. Joint zero remains guarded by
+the Server and succeeds only while the body is grounded.
+
 ## Current limits
 
 - Brainstem inference history, robot parameters, and profile management do not
   yet have public DOSO SDK facades.
-- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.1 and
+- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.2 and
   therefore do not come from this SDK.
-- Brainstem 2.1 IMU messages provide angular velocity and orientation, but no
-  linear acceleration field.
 - Managed streams do not reconnect silently. If `active` becomes false, call
   `startTelemetry()` again with the desired selection; cached freshness remains
   explicit.
@@ -267,5 +311,5 @@ the example then enables the SDK's explicit insecure-development opt-in.
 - The client destructor performs a best-effort stop and may wait up to the
   configured RPC timeout when it still owns a lease.
 
-The SDK version is `0.3.0`; its bundled protocol contract is `brainstem_api`
-`2.1.0`.
+The SDK version is `0.4.0`; its bundled protocol contract is `brainstem_api`
+`2.2.0`.

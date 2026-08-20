@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@ struct Quaternion {
 
 struct ImuSample {
   Vector3 angular_velocity_rps;
+  std::optional<Vector3> linear_acceleration_mps2;
   Quaternion orientation;
   std::chrono::nanoseconds elapsed{0};
 };
@@ -67,7 +69,7 @@ struct JointSample {
   std::chrono::nanoseconds elapsed{0};
 };
 
-enum class CmsStateKind {
+enum class BodyStateKind {
   Unknown,
   Zero,
   Grounded,
@@ -76,16 +78,16 @@ enum class CmsStateKind {
   Transitioning,
 };
 
-enum class CmsTransition {
+enum class BodyTransition {
   None,
   StandUp,
   SitDown,
   Gesture,
 };
 
-struct CmsState {
-  CmsStateKind kind{CmsStateKind::Unknown};
-  CmsTransition transition{CmsTransition::None};
+struct BodyState {
+  BodyStateKind kind{BodyStateKind::Unknown};
+  BodyTransition transition{BodyTransition::None};
   std::string gesture_name;
 };
 
@@ -94,7 +96,7 @@ inline constexpr std::size_t kJointCount = 16;
 struct TelemetryOptions {
   bool imu{true};
   bool joints{true};
-  bool cms{true};
+  bool body_state{true};
 };
 
 struct ImuSnapshot {
@@ -118,17 +120,17 @@ struct JointSnapshot {
   [[nodiscard]] bool fresh() const noexcept { return fresh_mask == 0xFFFFU; }
 };
 
-struct CmsSnapshot {
+struct BodySnapshot {
   bool active{false};
   bool available{false};
   std::uint64_t sequence{0};
-  CmsState value;
+  BodyState value;
 };
 
 struct TelemetrySnapshot {
   ImuSnapshot imu;
   JointSnapshot joints;
-  CmsSnapshot cms;
+  BodySnapshot body;
 };
 
 struct MotorState {

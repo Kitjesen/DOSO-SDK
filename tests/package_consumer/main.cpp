@@ -3,7 +3,7 @@
 int main() {
   brainstem::ImuSample imu;
   brainstem::JointSample joints;
-  brainstem::CmsState cms;
+  brainstem::BodyState body;
   brainstem::MotorStatus motors;
   brainstem::Voltage voltage;
   brainstem::TelemetryOptions telemetry_options;
@@ -15,7 +15,7 @@ int main() {
   brainstem::Client client(config);
   (void)imu;
   (void)joints;
-  (void)cms;
+  (void)body;
   (void)motors;
   (void)voltage;
   (void)telemetry_options;

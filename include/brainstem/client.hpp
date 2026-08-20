@@ -44,20 +44,29 @@ class Client final {
   Result stop() noexcept;
   Result standUp();
   Result sitDown();
-  Response<CmsState> getCmsState();
+  Result enableMotors();
+  Result disableMotors();
+  Result setJointZero();
+  Result clearMotorFaults(const std::vector<std::uint32_t> &joint_ids = {});
+  Response<std::chrono::system_clock::time_point> getServerStartTime();
+  Response<BodyState> getBodyState();
   Response<MotorStatus> getMotorStatus();
   Response<Voltage> getVoltage();
   Result startTelemetry(TelemetryOptions options = {});
   void stopTelemetry() noexcept;
   [[nodiscard]] TelemetrySnapshot telemetry() const;
+  [[nodiscard]] ImuSnapshot latestImu() const;
+  [[nodiscard]] JointSnapshot latestJoints() const;
+  [[nodiscard]] BodySnapshot latestBodyState() const;
   std::unique_ptr<Subscription> subscribeImu(std::function<void(const ImuSample &)> handler);
   std::unique_ptr<Subscription> subscribeJoints(std::function<void(const JointSample &)> handler);
-  std::unique_ptr<Subscription> subscribeCmsState(std::function<void(const CmsState &)> handler);
+  std::unique_ptr<Subscription> subscribeBodyState(std::function<void(const BodyState &)> handler);
 
   [[nodiscard]] ControlState state() const;
 
  private:
   Result bodyAction(bool stand);
+  Result motorPower(bool enable);
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

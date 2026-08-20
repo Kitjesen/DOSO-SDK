@@ -3,7 +3,7 @@
 // RobotControl — brainstem 对外的主控 gRPC 服务。
 // 提供运动控制指令和实时传感器数据流。
 //
-// API Version: 2.1.0 (2026-07-15)
+// API Version: 2.2.0 (2026-08-21)
 //
 // 兼容性承诺 (within 2.x):
 //   - 现有 RPC 的签名和语义不会改变
@@ -47,7 +47,7 @@ service RobotControl {
 
   // ──── 运动指令（经仲裁器，可能被拒绝） ────
 
-  // 行走：传入方向向量 (x=前后, y=左右, z=旋转)，范围 [-1, 1]。
+  // 机身速度：x=前后 m/s，y=左右 m/s，z=旋转 rad/s。
   rpc Walk(Vector3) returns (google.protobuf.Empty);
   // Lease-aware walking command. Autonomous clients must use this RPC so a
   // transport-level OK can be distinguished from an accepted motor command.
@@ -190,6 +190,8 @@ message Imu {
   Quaternion quaternion = 2;
   // 相对于会话开始时间的时间戳。
   google.protobuf.Duration timestamp = 3;
+  // 线加速度 (m/s²)，body frame；旧服务端可能不提供该字段。
+  Vector3 linear_acceleration = 4;
 }
 
 // 关节数据（支持单关节上报和全关节快照两种模式）。
@@ -348,7 +350,7 @@ message Command {
     google.protobuf.Empty stand_up = 2;
     // 坐下：从站立平滑过渡到坐姿。
     google.protobuf.Empty sit_down = 3;
-    // 行走：(x=前后, y=左右, z=旋转)，范围 [-1, 1]。
+    // 机身速度：x=前后 m/s，y=左右 m/s，z=旋转 rad/s。
     Vector3 walk = 4;
   }
 }
