@@ -1,0 +1,25 @@
+name: DOSO Brainstem C++ SDK
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test-install:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc
+
+      - name: Verify build, tests, install, and consumer
+        run: bash scripts/verify.sh
