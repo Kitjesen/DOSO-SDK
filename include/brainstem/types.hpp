@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -24,6 +26,7 @@ struct Config {
   std::string client_id;
   bool allow_insecure{false};
   TlsConfig tls;
+  std::chrono::milliseconds telemetry_stale_after{500};
 };
 
 struct Velocity {
@@ -84,6 +87,48 @@ struct CmsState {
   CmsStateKind kind{CmsStateKind::Unknown};
   CmsTransition transition{CmsTransition::None};
   std::string gesture_name;
+};
+
+inline constexpr std::size_t kJointCount = 16;
+
+struct TelemetryOptions {
+  bool imu{true};
+  bool joints{true};
+  bool cms{true};
+};
+
+struct ImuSnapshot {
+  bool active{false};
+  bool available{false};
+  bool fresh{false};
+  std::chrono::milliseconds age{0};
+  std::uint64_t sequence{0};
+  ImuSample value;
+};
+
+struct JointSnapshot {
+  bool active{false};
+  std::uint16_t valid_mask{0};
+  std::uint16_t fresh_mask{0};
+  std::uint64_t sequence{0};
+  std::array<JointState, kJointCount> joints{};
+  std::array<std::chrono::nanoseconds, kJointCount> elapsed{};
+
+  [[nodiscard]] bool complete() const noexcept { return valid_mask == 0xFFFFU; }
+  [[nodiscard]] bool fresh() const noexcept { return fresh_mask == 0xFFFFU; }
+};
+
+struct CmsSnapshot {
+  bool active{false};
+  bool available{false};
+  std::uint64_t sequence{0};
+  CmsState value;
+};
+
+struct TelemetrySnapshot {
+  ImuSnapshot imu;
+  JointSnapshot joints;
+  CmsSnapshot cms;
 };
 
 struct MotorState {

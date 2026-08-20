@@ -526,6 +526,27 @@ void testImuSubscriptionMapsOneCompleteSample() {
         "IMU timestamp must preserve duration precision");
 }
 
+void testManagedTelemetryStartsOnlyRequestedStreams() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  brainstem::TelemetryOptions options;
+  options.imu = true;
+  options.joints = false;
+  options.cms = false;
+
+  const brainstem::Result started = client.startTelemetry(options);
+  const brainstem::TelemetrySnapshot telemetry = client.telemetry();
+
+  check(started.ok && started.transport_ok,
+        "requested telemetry must start with an initial sample");
+  check(telemetry.imu.available && telemetry.imu.fresh,
+        "managed telemetry must cache the latest IMU sample");
+  check(telemetry.imu.sequence == 1, "first managed IMU sample must have sequence one");
+  close(telemetry.imu.value.angular_velocity_rps.x, 1.0, "managed IMU gyro x");
+  check(telemetry.joints.valid_mask == 0, "disabled joint telemetry must stay empty");
+  check(!telemetry.cms.available, "disabled CMS telemetry must stay empty");
+}
+
 void testSubscriptionCancellationStopsAStreamingRpc() {
   TestServer server;
   server.service().holdImuStream();
@@ -573,6 +594,37 @@ void testJointSubscriptionMapsSnapshotsAndSingleUpdates() {
   check(received[1].elapsed == 99ns, "single-joint timestamp");
 }
 
+void testManagedJointTelemetryMergesSingleJointUpdates() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  brainstem::TelemetryOptions options;
+  options.imu = false;
+  options.joints = true;
+  options.cms = false;
+
+  const brainstem::Result started = client.startTelemetry(options);
+  brainstem::TelemetrySnapshot telemetry;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    telemetry = client.telemetry();
+    if (telemetry.joints.sequence >= 2) {
+      break;
+    }
+    std::this_thread::sleep_for(1ms);
+  }
+
+  check(started.ok, "managed joint telemetry must receive its initial state");
+  check(telemetry.joints.complete() && telemetry.joints.fresh(),
+        "all 16 managed joints must be valid and fresh");
+  check(telemetry.joints.sequence == 2,
+        "full snapshot and single-joint update must both advance the sequence");
+  close(telemetry.joints.joints[7].position_rad, -1.0, "single-joint update must replace its slot");
+  close(telemetry.joints.joints[8].position_rad, 8.1,
+        "single-joint update must preserve every other slot");
+  check(telemetry.joints.elapsed[7] == 99ns, "single-joint update must replace its slot timestamp");
+  check(telemetry.joints.elapsed[8] == 5s,
+        "single-joint update must preserve every other slot timestamp");
+}
+
 void testCmsStateSubscriptionUsesTheSnapshotMapping() {
   TestServer server;
   brainstem::Client client(server.config());
@@ -588,6 +640,95 @@ void testCmsStateSubscriptionUsesTheSnapshotMapping() {
   check(received[1].kind == brainstem::CmsStateKind::Transitioning &&
             received[1].transition == brainstem::CmsTransition::SitDown,
         "CMS subscription must map transition intent");
+}
+
+void testManagedCmsTelemetryCachesTheLatestState() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  brainstem::TelemetryOptions options;
+  options.imu = false;
+  options.joints = false;
+  options.cms = true;
+
+  const brainstem::Result started = client.startTelemetry(options);
+  brainstem::TelemetrySnapshot telemetry;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    telemetry = client.telemetry();
+    if (telemetry.cms.sequence >= 2) {
+      break;
+    }
+    std::this_thread::sleep_for(1ms);
+  }
+
+  check(started.ok, "managed CMS telemetry must receive its initial state");
+  check(telemetry.cms.available, "managed CMS telemetry must cache a state");
+  check(telemetry.cms.sequence == 2, "every CMS state change must advance the sequence");
+  check(telemetry.cms.value.kind == brainstem::CmsStateKind::Transitioning &&
+            telemetry.cms.value.transition == brainstem::CmsTransition::SitDown,
+        "managed CMS telemetry must expose the latest transition");
+  check(!telemetry.imu.available && telemetry.joints.valid_mask == 0,
+        "unrequested managed streams must remain empty");
+}
+
+void testManagedTelemetryMarksExpiredSamplesStale() {
+  TestServer server;
+  brainstem::Config config = server.config();
+  config.telemetry_stale_after = 5ms;
+  brainstem::Client client(std::move(config));
+  brainstem::TelemetryOptions options;
+  options.imu = true;
+  options.joints = false;
+  options.cms = false;
+
+  check(client.startTelemetry(options).ok, "managed IMU telemetry must receive an initial sample");
+  std::this_thread::sleep_for(10ms);
+  const brainstem::TelemetrySnapshot telemetry = client.telemetry();
+
+  check(telemetry.imu.available, "an expired sample must remain readable");
+  check(!telemetry.imu.fresh, "an expired sample must be marked stale");
+  check(telemetry.imu.age >= 5ms, "expired sample age must be exposed");
+}
+
+void testStopTelemetryClearsManagedState() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  check(client.startTelemetry().ok, "all managed streams must receive initial data");
+
+  client.stopTelemetry();
+  const brainstem::TelemetrySnapshot telemetry = client.telemetry();
+
+  check(!telemetry.imu.active && !telemetry.imu.available,
+        "stopped IMU telemetry must be inactive and unavailable");
+  check(!telemetry.joints.active && telemetry.joints.valid_mask == 0,
+        "stopped joint telemetry must be inactive and invalid");
+  check(!telemetry.cms.active && !telemetry.cms.available,
+        "stopped CMS telemetry must be inactive and unavailable");
+}
+
+void testManagedTelemetryCanChangeSelection() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  brainstem::TelemetryOptions options;
+  options.imu = true;
+  options.joints = false;
+  options.cms = false;
+  check(client.startTelemetry(options).ok, "initial IMU selection must start");
+
+  options.imu = false;
+  options.joints = true;
+  check(client.startTelemetry(options).ok, "replacement joint selection must start");
+  brainstem::TelemetrySnapshot telemetry;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    telemetry = client.telemetry();
+    if (telemetry.joints.complete()) {
+      break;
+    }
+    std::this_thread::sleep_for(1ms);
+  }
+
+  check(!telemetry.imu.active && !telemetry.imu.available,
+        "changing selection must stop and invalidate IMU telemetry");
+  check(telemetry.joints.complete(), "changing selection must populate requested joints");
 }
 
 void testTlsNameCannotSilentlyUseAnInsecureChannel() {
@@ -959,9 +1100,15 @@ int main() {
     testMotorStatusSnapshotPreservesDiagnostics();
     testVoltageSnapshotPreservesJointOrder();
     testImuSubscriptionMapsOneCompleteSample();
+    testManagedTelemetryStartsOnlyRequestedStreams();
     testSubscriptionCancellationStopsAStreamingRpc();
     testJointSubscriptionMapsSnapshotsAndSingleUpdates();
+    testManagedJointTelemetryMergesSingleJointUpdates();
     testCmsStateSubscriptionUsesTheSnapshotMapping();
+    testManagedCmsTelemetryCachesTheLatestState();
+    testManagedTelemetryMarksExpiredSamplesStale();
+    testStopTelemetryClearsManagedState();
+    testManagedTelemetryCanChangeSelection();
     testTlsNameCannotSilentlyUseAnInsecureChannel();
     testClientIdentityMustBeExplicit();
     testInsecureTransportRequiresExplicitOptIn();

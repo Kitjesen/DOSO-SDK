@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Added managed, selectively enabled IMU, joint, and CMS telemetry streams.
+- Added thread-safe latest-value snapshots with IMU age/freshness and per-joint
+  validity/freshness masks.
+- Added merging of full joint snapshots and single-joint delta updates into one
+  stable 16-joint view.
+- Kept raw cancellable subscriptions available for applications that need to
+  process every frame.
+
 ## 0.2.0
 
 - Added typed CMS-state, motor-diagnostic, and voltage snapshot queries.

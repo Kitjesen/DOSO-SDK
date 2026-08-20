@@ -39,7 +39,7 @@ brainstem::Result moving = client.move({0.2, 0.0, 0.3});
 brainstem::Result stopped = client.stop();
 ```
 
-The first release deliberately keeps the public surface small:
+The public surface deliberately stays small:
 
 - `connect()` checks reachability and reads one control-state snapshot.
 - `refresh()` acquires or renews the explicit control lease. Initial acquisition
@@ -51,8 +51,10 @@ The first release deliberately keeps the public surface small:
 - `standUp()` and `sitDown()` stop and release locomotion first if this client
   owns the lease, then submit the posture action.
 - `getCmsState()`, `getMotorStatus()`, and `getVoltage()` read typed snapshots.
+- `startTelemetry()`, `telemetry()`, and `stopTelemetry()` manage selected
+  background streams and expose one thread-safe latest-value snapshot.
 - `subscribeCmsState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
-  cancellable telemetry streams.
+  cancellable raw streams for callers that need every frame.
 - `state()` returns the most recently decoded state without network I/O.
 
 `move()` enforces the Server's 20 ms minimum checked-command interval. A lost
@@ -60,21 +62,66 @@ ACK is retried once with the same sequence and payload, matching the Server's
 idempotency contract. Preemption, a rejected sequence, or a failed lease renewal
 invalidates local motion readiness.
 
-## Telemetry
+## Managed telemetry
+
+Select only the streams the application needs. Starting telemetry waits up to
+`Config::timeout` for an initial usable sample from each selected stream. Reading
+`telemetry()` only copies the local cache; it performs no network I/O and can run
+alongside the serialized motion-control loop.
+
+```cpp
+brainstem::TelemetryOptions options;
+options.imu = true;
+options.joints = true;
+options.cms = false;
+
+brainstem::Result started = client.startTelemetry(options);
+if (started.ok) {
+  brainstem::TelemetrySnapshot snapshot = client.telemetry();
+  if (snapshot.imu.available && snapshot.imu.fresh) {
+    const auto angular_velocity = snapshot.imu.value.angular_velocity_rps;
+  }
+  if (snapshot.joints.complete() && snapshot.joints.fresh()) {
+    const brainstem::JointState &front_right_hip = snapshot.joints.joints[0];
+  }
+}
+
+client.stopTelemetry();
+```
+
+`startTelemetry()` defaults to IMU, joints, and CMS. Calling it again applies a
+new selection: disabled streams are cancelled and inactive selected streams are
+restarted. `active` reports whether the Server stream is still running;
+`available` and the joint `valid_mask` report whether cached data may be read.
+IMU `age`/`fresh` and the joint `fresh_mask` use
+`Config::telemetry_stale_after`, which defaults to 500 ms.
+
+The joint cache has 16 stable slots indexed by joint ID. A full Brainstem frame
+populates all slots; later single-joint messages update only their own slot.
+`elapsed[id]` preserves the matching Brainstem sample timestamp. Call
+`complete()` before assuming all 16 positions are known.
+
+Motor temperature, per-motor voltage, faults, and aggregate voltage are
+request/response data in `brainstem_api` 2.1, not streams. Read them when needed
+with `getMotorStatus()` and `getVoltage()`; they do not require
+`startTelemetry()` or a locomotion lease.
+
+## Telemetry reference
 
 The SDK currently returns these public types:
 
 | API | Information |
 | --- | --- |
 | `connect()` / `state()` | Connectivity, readiness, FSM, motor enable/fault, lease owner and remaining time, command sequence, accepted/rejected counts. |
-| `getCmsState()` / `subscribeCmsState()` | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
+| `getCmsState()` / managed or raw CMS stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
 | `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
 | `getVoltage()` | Voltage values in Brainstem protocol order. |
-| `subscribeImu()` | Body-frame angular velocity, orientation quaternion, and session-relative timestamp. |
-| `subscribeJoints()` | Position, velocity, torque, status, joint ID, and session-relative timestamp; both 16-joint snapshots and single-joint updates are preserved. |
+| managed or raw IMU stream | Body-frame angular velocity, orientation quaternion, and session-relative timestamp. |
+| managed or raw joint stream | Position, velocity, torque, status, joint ID, and session-relative timestamp; full snapshots and single-joint updates are merged by the managed cache. |
 
-Subscriptions own one worker thread and one Server stream. The callback runs on
-that worker thread. Cancellation and completion are explicit:
+For advanced per-frame processing, each raw subscription owns one worker thread
+and one Server stream. The callback runs on that worker thread. Cancellation and
+completion are explicit:
 
 ```cpp
 auto imu = client.subscribeImu([](const brainstem::ImuSample &sample) {
@@ -207,6 +254,11 @@ the example then enables the SDK's explicit insecure-development opt-in.
   yet have public DOSO SDK facades.
 - Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.1 and
   therefore do not come from this SDK.
+- Brainstem 2.1 IMU messages provide angular velocity and orientation, but no
+  linear acceleration field.
+- Managed streams do not reconnect silently. If `active` becomes false, call
+  `startTelemetry()` again with the desired selection; cached freshness remains
+  explicit.
 - Gesture and speed-mode RPC names exist in the protocol, but Brainstem Server
   currently returns `UNIMPLEMENTED`; they are not advertised as SDK features.
 - No recover-stand or damping action because Brainstem Server does not yet
@@ -215,5 +267,5 @@ the example then enables the SDK's explicit insecure-development opt-in.
 - The client destructor performs a best-effort stop and may wait up to the
   configured RPC timeout when it still owns a lease.
 
-The SDK version is `0.2.0`; its bundled protocol contract is `brainstem_api`
+The SDK version is `0.3.0`; its bundled protocol contract is `brainstem_api`
 `2.1.0`.

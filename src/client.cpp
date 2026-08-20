@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -58,6 +59,9 @@ void validateConfig(const Config &config) {
   }
   if (config.timeout <= std::chrono::milliseconds::zero()) {
     throw std::invalid_argument("Brainstem timeout must be positive");
+  }
+  if (config.telemetry_stale_after <= std::chrono::milliseconds::zero()) {
+    throw std::invalid_argument("Brainstem telemetry_stale_after must be positive");
   }
   if (!config.tls.server_name.empty() && !config.tls.enabled()) {
     throw std::invalid_argument("Brainstem TLS server_name requires mTLS certificate files");
@@ -357,6 +361,24 @@ struct Client::Impl {
   bool has_sent_velocity{false};
   std::chrono::steady_clock::time_point last_velocity_at{};
   ControlState last_state;
+  mutable std::mutex telemetry_lifecycle_mutex;
+  mutable std::mutex telemetry_mutex;
+  std::condition_variable telemetry_changed;
+  std::unique_ptr<Subscription> imu_subscription;
+  ImuSample latest_imu;
+  std::chrono::steady_clock::time_point imu_received_at{};
+  std::uint64_t imu_sequence{0};
+  bool imu_available{false};
+  std::unique_ptr<Subscription> joint_subscription;
+  std::array<JointState, kJointCount> latest_joints{};
+  std::array<std::chrono::nanoseconds, kJointCount> joint_elapsed{};
+  std::array<std::chrono::steady_clock::time_point, kJointCount> joint_received_at{};
+  std::uint16_t joint_valid_mask{0};
+  std::uint64_t joint_sequence{0};
+  std::unique_ptr<Subscription> cms_subscription;
+  CmsState latest_cms;
+  std::uint64_t cms_sequence{0};
+  bool cms_available{false};
 
   void setDeadline(grpc::ClientContext &context) const {
     context.set_deadline(std::chrono::system_clock::now() + config.timeout);
@@ -513,6 +535,7 @@ Client::Client(Config config) : impl_(std::make_unique<Impl>(std::move(config)))
 
 Client::~Client() {
   if (impl_) {
+    stopTelemetry();
     (void)stop();
   }
 }
@@ -520,6 +543,7 @@ Client::Client(Client &&) noexcept = default;
 Client &Client::operator=(Client &&other) noexcept {
   if (this != &other) {
     if (impl_) {
+      stopTelemetry();
       (void)stop();
     }
     impl_ = std::move(other.impl_);
@@ -918,6 +942,164 @@ Response<Voltage> Client::getVoltage() {
   Voltage voltage;
   voltage.values_v.assign(response.values().begin(), response.values().end());
   return {{true, true, false, false, impl_->last_state, {}}, std::move(voltage)};
+}
+
+Result Client::startTelemetry(TelemetryOptions options) {
+  if (!impl_) {
+    Result failure;
+    failure.state.reason = "client_moved";
+    failure.error = failure.state.reason;
+    return failure;
+  }
+
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  if (!options.imu) {
+    impl_->imu_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->imu_available = false;
+    impl_->imu_sequence = 0;
+  } else if (!impl_->imu_subscription || !impl_->imu_subscription->active()) {
+    impl_->imu_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->imu_available = false;
+      impl_->imu_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->imu_subscription = subscribeImu([state](const ImuSample &sample) {
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        state->latest_imu = sample;
+        state->imu_received_at = std::chrono::steady_clock::now();
+        state->imu_available = true;
+        ++state->imu_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  if (!options.joints) {
+    impl_->joint_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->joint_valid_mask = 0;
+    impl_->joint_sequence = 0;
+  } else if (!impl_->joint_subscription || !impl_->joint_subscription->active()) {
+    impl_->joint_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->joint_valid_mask = 0;
+      impl_->joint_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->joint_subscription = subscribeJoints([state](const JointSample &sample) {
+      const auto received_at = std::chrono::steady_clock::now();
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        for (const JointState &joint : sample.joints) {
+          if (joint.id >= kJointCount) {
+            throw std::runtime_error("joint telemetry id is out of range");
+          }
+          state->latest_joints[joint.id] = joint;
+          state->joint_elapsed[joint.id] = sample.elapsed;
+          state->joint_received_at[joint.id] = received_at;
+          state->joint_valid_mask |= static_cast<std::uint16_t>(1U << joint.id);
+        }
+        ++state->joint_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  if (!options.cms) {
+    impl_->cms_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->cms_available = false;
+    impl_->cms_sequence = 0;
+  } else if (!impl_->cms_subscription || !impl_->cms_subscription->active()) {
+    impl_->cms_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->cms_available = false;
+      impl_->cms_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->cms_subscription = subscribeCmsState([state](const CmsState &cms) {
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        state->latest_cms = cms;
+        state->cms_available = true;
+        ++state->cms_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  std::unique_lock<std::mutex> data_lock(impl_->telemetry_mutex);
+  const bool ready = impl_->telemetry_changed.wait_for(data_lock, impl_->config.timeout, [&] {
+    return (!options.imu || impl_->imu_available) &&
+           (!options.joints || impl_->joint_valid_mask != 0) &&
+           (!options.cms || impl_->cms_available);
+  });
+  ControlState state = impl_->last_state;
+  if (!ready) {
+    state.ready = false;
+    state.reason = "telemetry_timeout";
+    return {false, false, false, false, state, state.reason};
+  }
+  return {true, true, false, false, state, {}};
+}
+
+void Client::stopTelemetry() noexcept {
+  if (!impl_) {
+    return;
+  }
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  impl_->imu_subscription.reset();
+  impl_->joint_subscription.reset();
+  impl_->cms_subscription.reset();
+  std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+  impl_->imu_available = false;
+  impl_->imu_sequence = 0;
+  impl_->joint_valid_mask = 0;
+  impl_->joint_sequence = 0;
+  impl_->cms_available = false;
+  impl_->cms_sequence = 0;
+}
+
+TelemetrySnapshot Client::telemetry() const {
+  TelemetrySnapshot snapshot;
+  if (!impl_) {
+    return snapshot;
+  }
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+  snapshot.imu.active = impl_->imu_subscription && impl_->imu_subscription->active();
+  snapshot.imu.available = impl_->imu_available;
+  snapshot.imu.sequence = impl_->imu_sequence;
+  snapshot.imu.value = impl_->latest_imu;
+  if (impl_->imu_available) {
+    const auto age = std::chrono::steady_clock::now() - impl_->imu_received_at;
+    snapshot.imu.age = std::chrono::duration_cast<std::chrono::milliseconds>(age);
+    snapshot.imu.fresh = age <= impl_->config.telemetry_stale_after;
+  }
+  snapshot.joints.active = impl_->joint_subscription && impl_->joint_subscription->active();
+  snapshot.joints.valid_mask = impl_->joint_valid_mask;
+  snapshot.joints.sequence = impl_->joint_sequence;
+  snapshot.joints.joints = impl_->latest_joints;
+  snapshot.joints.elapsed = impl_->joint_elapsed;
+  const auto now = std::chrono::steady_clock::now();
+  for (std::size_t id = 0; id < kJointCount; ++id) {
+    const std::uint16_t bit = static_cast<std::uint16_t>(1U << id);
+    if ((impl_->joint_valid_mask & bit) != 0 &&
+        now - impl_->joint_received_at[id] <= impl_->config.telemetry_stale_after) {
+      snapshot.joints.fresh_mask |= bit;
+    }
+  }
+  snapshot.cms.active = impl_->cms_subscription && impl_->cms_subscription->active();
+  snapshot.cms.available = impl_->cms_available;
+  snapshot.cms.sequence = impl_->cms_sequence;
+  snapshot.cms.value = impl_->latest_cms;
+  return snapshot;
 }
 
 std::unique_ptr<Subscription> Client::subscribeImu(std::function<void(const ImuSample &)> handler) {

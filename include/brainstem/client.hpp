@@ -47,6 +47,9 @@ class Client final {
   Response<CmsState> getCmsState();
   Response<MotorStatus> getMotorStatus();
   Response<Voltage> getVoltage();
+  Result startTelemetry(TelemetryOptions options = {});
+  void stopTelemetry() noexcept;
+  [[nodiscard]] TelemetrySnapshot telemetry() const;
   std::unique_ptr<Subscription> subscribeImu(std::function<void(const ImuSample &)> handler);
   std::unique_ptr<Subscription> subscribeJoints(std::function<void(const JointSample &)> handler);
   std::unique_ptr<Subscription> subscribeCmsState(std::function<void(const CmsState &)> handler);

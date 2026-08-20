@@ -6,6 +6,8 @@ int main() {
   brainstem::CmsState cms;
   brainstem::MotorStatus motors;
   brainstem::Voltage voltage;
+  brainstem::TelemetryOptions telemetry_options;
+  brainstem::TelemetrySnapshot telemetry;
   brainstem::Config config;
   config.target = "127.0.0.1:13145";
   config.client_id = "consumer@tests";
@@ -16,5 +18,7 @@ int main() {
   (void)cms;
   (void)motors;
   (void)voltage;
+  (void)telemetry_options;
+  (void)telemetry;
   return client.state().connected ? 1 : 0;
 }
