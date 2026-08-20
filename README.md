@@ -1,4 +1,4 @@
-# DOSO Brainstem C++ SDK
+# DOSO SDK
 
 The official thin C++17 client SDK created by **DOSO** for external programs
 that control a Brainstem Server. The public headers expose DOSO's stable
@@ -93,7 +93,7 @@ and isolated tests. Production remote motion uses mutual TLS.
 
 ## Relationship to Unitree SDK2
 
-| Unitree SDK2 | DOSO Brainstem C++ SDK |
+| Unitree SDK2 | DOSO SDK |
 | --- | --- |
 | `SportClient::Init()` | construct `Client`, then `connect()` |
 | internal control ownership | `refresh()` manages an explicit lease |

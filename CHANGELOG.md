@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-- Added the DOSO Brainstem C++ autonomous-motion client.
+- Added the DOSO SDK Brainstem C++ autonomous-motion client.
 - Added explicit lease acquire, renewal, and release handling.
 - Added checked physical-velocity commands with sequence validation and one
   idempotent retry after a lost ACK.

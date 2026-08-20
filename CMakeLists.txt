@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(DOSOBrainstemClient VERSION 0.1.0 LANGUAGES CXX)
+project(DOSOSDK VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
-option(BRAINSTEM_BUILD_EXAMPLES "Build DOSO Brainstem C++ SDK examples" OFF)
+option(BRAINSTEM_BUILD_EXAMPLES "Build DOSO SDK examples" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

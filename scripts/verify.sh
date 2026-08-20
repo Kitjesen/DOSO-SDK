@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${BRAINSTEM_VERIFY_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/DOSO-Brainstem-CPP-SDK.XXXXXX")}"
+WORK="${BRAINSTEM_VERIFY_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/DOSO-SDK.XXXXXX")}"
 BUILD="${WORK}/build"
 INSTALL="${WORK}/install"
 CONSUMER="${WORK}/consumer"
@@ -21,5 +21,5 @@ cmake -S "${ROOT}/tests/package_consumer" -B "${CONSUMER}" \
 cmake --build "${CONSUMER}" --parallel
 "${CONSUMER}/brainstem_client_consumer"
 
-echo "DOSO Brainstem C++ SDK verification passed"
+echo "DOSO SDK verification passed"
 echo "verification work directory: ${WORK}"

@@ -1,4 +1,4 @@
-name: DOSO Brainstem C++ SDK
+name: DOSO SDK
 
 on:
   push:
