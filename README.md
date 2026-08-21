@@ -60,7 +60,8 @@ The public surface deliberately stays small:
   cache directly; none of these getters perform network I/O.
 - `subscribeBodyState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
   cancellable raw streams for callers that need every frame.
-- `state()` returns the most recently decoded state without network I/O.
+- `controlState()` returns the most recently decoded control state without
+  network I/O.
 
 `move()` enforces the Server's 20 ms minimum checked-command interval. A lost
 ACK is retried once with the same sequence and payload, matching the Server's
@@ -78,24 +79,27 @@ alongside the serialized motion-control loop.
 brainstem::TelemetryOptions options;
 options.imu = true;
 options.joints = true;
-options.body_state = false;
+options.body = false;
 
 brainstem::Result started = client.startTelemetry(options);
 if (started.ok) {
-  brainstem::TelemetrySnapshot snapshot = client.telemetry();
-  if (snapshot.imu.available && snapshot.imu.fresh) {
-    const auto angular_velocity = snapshot.imu.value.angular_velocity_rps;
-    const auto linear_acceleration = snapshot.imu.value.linear_acceleration_mps2;
+  brainstem::ImuSnapshot imu = client.latestImu();
+  if (imu.available && imu.fresh) {
+    const auto angular_velocity = imu.value.angular_velocity_rad_s;
+    const auto linear_acceleration = imu.value.linear_acceleration_m_s2;
   }
-  if (snapshot.joints.complete() && snapshot.joints.fresh()) {
-    const brainstem::JointState &front_right_hip = snapshot.joints.joints[0];
+  brainstem::JointSnapshot joints = client.latestJoints();
+  if (joints.complete() && joints.fresh()) {
+    const brainstem::JointState &front_right_hip = joints.joints[0];
   }
 }
 
 client.stopTelemetry();
 ```
 
-`startTelemetry()` defaults to IMU, joints, and body state. Calling it again
+`startTelemetry()` explicitly starts the selected long-lived gRPC streams and
+their cache worker threads; it is not required by one-shot query APIs such as
+`getMotorStatus()`. It defaults to IMU, joints, and body state. Calling it again
 applies a new selection: disabled streams are cancelled and inactive selected
 streams are restarted. `active` reports whether the Server stream is still running;
 `available` and the joint `valid_mask` report whether cached data may be read.
@@ -104,7 +108,7 @@ IMU `age`/`fresh` and the joint `fresh_mask` use
 
 The joint cache has 16 stable slots indexed by joint ID. A full Brainstem frame
 populates all slots; later single-joint messages update only their own slot.
-`elapsed[id]` preserves the matching Brainstem sample timestamp. Call
+`server_elapsed[id]` preserves the matching Brainstem sample timestamp. Call
 `complete()` before assuming all 16 positions are known.
 
 Motor temperature, per-motor voltage, faults, and aggregate voltage are
@@ -112,8 +116,10 @@ request/response data in `brainstem_api` 2.2, not streams. Read them when needed
 with `getMotorStatus()` and `getVoltage()`; they do not require
 `startTelemetry()` or a locomotion lease.
 
-The IMU cache contains body-frame angular velocity in rad/s, an orientation
-quaternion in `w/x/y/z` order, and session-relative elapsed time. With a 2.2
+The IMU cache contains body-frame angular velocity in rad/s, a
+`orientation_world_to_body` quaternion in `w/x/y/z` order, and
+session-relative `server_elapsed`. The body frame is right-handed: +X forward,
++Y left, +Z up. With a 2.2
 Server it also contains body-frame linear acceleration in m/s². The acceleration
 is an `std::optional`: it is empty when connected to a compatible older Server
 that does not send field 4.
@@ -124,7 +130,7 @@ The SDK currently returns these public types:
 
 | API | Information |
 | --- | --- |
-| `connect()` / `state()` | Connectivity, readiness, FSM, motor enable/fault, lease owner and remaining time, command sequence, accepted/rejected counts. |
+| `connect()` / `controlState()` | Connectivity, typed body state, software motor-output gate/fault, motion readiness, lease owner and remaining time, command sequence, accepted/rejected counts. |
 | `getServerStartTime()` | Brainstem process start time as a UTC `system_clock::time_point`; use it to detect a Server restart and invalidate session-relative assumptions. |
 | `getBodyState()` / managed or raw body-state stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
 | `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
@@ -192,7 +198,7 @@ and isolated tests. Production remote motion uses mutual TLS.
 | --- | --- |
 | `SportClient::Init()` | construct `Client`, then `connect()` |
 | internal control ownership | `refresh()` manages an explicit lease |
-| `Move(vx, vy, wz)` | `move({vx_mps, vy_mps, yaw_rps})` |
+| `Move(vx, vy, wz)` | `move({vx_mps, vy_mps, yaw_rad_s})` |
 | `StopMove()` | confirmed checked-zero plus lease release |
 | `StandUp()` | `standUp()` |
 | `Sit()` | `sitDown()` |
@@ -311,5 +317,5 @@ the Server and succeeds only while the body is grounded.
 - The client destructor performs a best-effort stop and may wait up to the
   configured RPC timeout when it still owns a lease.
 
-The SDK version is `0.4.0`; its bundled protocol contract is `brainstem_api`
+The SDK version is `0.5.0`; its bundled protocol contract is `brainstem_api`
 `2.2.0`.

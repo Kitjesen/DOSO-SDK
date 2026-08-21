@@ -31,9 +31,10 @@ struct Config {
 };
 
 struct Velocity {
+  // Body frame: +X forward, +Y left, +Z up; positive yaw is about +Z.
   double vx_mps{0.0};
   double vy_mps{0.0};
-  double yaw_rps{0.0};
+  double yaw_rad_s{0.0};
 };
 
 struct Vector3 {
@@ -50,23 +51,24 @@ struct Quaternion {
 };
 
 struct ImuSample {
-  Vector3 angular_velocity_rps;
-  std::optional<Vector3> linear_acceleration_mps2;
-  Quaternion orientation;
-  std::chrono::nanoseconds elapsed{0};
+  // Body frame: +X forward, +Y left, +Z up.
+  Vector3 angular_velocity_rad_s;
+  std::optional<Vector3> linear_acceleration_m_s2;
+  Quaternion orientation_world_to_body;
+  std::chrono::nanoseconds server_elapsed{0};
 };
 
 struct JointState {
   std::uint32_t id{0};
   double position_rad{0.0};
-  double velocity_rps{0.0};
+  double velocity_rad_s{0.0};
   double torque_nm{0.0};
   std::uint32_t status_code{0};
 };
 
 struct JointSample {
   std::vector<JointState> joints;
-  std::chrono::nanoseconds elapsed{0};
+  std::chrono::nanoseconds server_elapsed{0};
 };
 
 enum class BodyStateKind {
@@ -96,7 +98,7 @@ inline constexpr std::size_t kJointCount = 16;
 struct TelemetryOptions {
   bool imu{true};
   bool joints{true};
-  bool body_state{true};
+  bool body{true};
 };
 
 struct ImuSnapshot {
@@ -114,13 +116,13 @@ struct JointSnapshot {
   std::uint16_t fresh_mask{0};
   std::uint64_t sequence{0};
   std::array<JointState, kJointCount> joints{};
-  std::array<std::chrono::nanoseconds, kJointCount> elapsed{};
+  std::array<std::chrono::nanoseconds, kJointCount> server_elapsed{};
 
   [[nodiscard]] bool complete() const noexcept { return valid_mask == 0xFFFFU; }
   [[nodiscard]] bool fresh() const noexcept { return fresh_mask == 0xFFFFU; }
 };
 
-struct BodySnapshot {
+struct BodyStateSnapshot {
   bool active{false};
   bool available{false};
   std::uint64_t sequence{0};
@@ -130,7 +132,7 @@ struct BodySnapshot {
 struct TelemetrySnapshot {
   ImuSnapshot imu;
   JointSnapshot joints;
-  BodySnapshot body;
+  BodyStateSnapshot body;
 };
 
 struct MotorState {
@@ -140,7 +142,7 @@ struct MotorState {
   double temperature_c{0.0};
   double voltage_v{0.0};
   double position_rad{0.0};
-  double velocity_rps{0.0};
+  double velocity_rad_s{0.0};
   double torque_nm{0.0};
   std::vector<std::uint32_t> errors;
 };
@@ -155,16 +157,17 @@ struct Voltage {
 
 struct ControlState {
   bool connected{false};
-  bool ready{false};
-  bool motors_enabled{false};
-  bool critical_fault{false};
+  bool motion_ready{false};
+  // Software output gate reported by Brainstem, not a per-motor hardware ACK.
+  bool motor_output_enabled{false};
+  bool critical_motor_fault{false};
   bool lease_valid{false};
   bool initial_zero_acknowledged{false};
   std::uint32_t lease_remaining_ms{0};
-  std::uint64_t accepted_sequence{0};
+  std::uint64_t last_accepted_sequence{0};
   std::uint64_t accepted_count{0};
   std::uint64_t rejected_count{0};
-  std::string fsm{"unknown"};
+  BodyState body;
   std::string reason{"not_connected"};
   std::string control_owner{"none"};
   std::string control_owner_id;
@@ -179,7 +182,8 @@ struct Result {
   std::string error;
 
   [[nodiscard]] bool confirmsStop() const noexcept {
-    return ok && transport_ok && accepted && stop_confirmed && !state.ready && !state.lease_valid;
+    return ok && transport_ok && accepted && stop_confirmed && !state.motion_ready &&
+           !state.lease_valid;
   }
 };
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(DOSOSDK VERSION 0.4.0 LANGUAGES CXX)
+project(DOSOSDK VERSION 0.5.0 LANGUAGES CXX)
 
 include(CTest)
 include(CMakePackageConfigHelpers)

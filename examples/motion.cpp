@@ -9,7 +9,7 @@
 int main(int argc, char **argv) {
   if (argc != 7 && argc != 10 && argc != 11) {
     std::cerr << "usage: " << argv[0]
-              << " <host:port> <client_id> <vx_mps> <vy_mps> <yaw_rps> <duration_ms>"
+              << " <host:port> <client_id> <vx_mps> <vy_mps> <yaw_rad_s> <duration_ms>"
                  " [<ca.pem> <client.crt> <client.key> [<server_name>]]\n";
     return 64;
   }

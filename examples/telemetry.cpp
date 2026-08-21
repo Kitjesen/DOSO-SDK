@@ -92,13 +92,13 @@ int main(int argc, char **argv) {
     const brainstem::ImuSnapshot imu = client.latestImu();
     if (imu.available && imu.sequence != imu_sequence) {
       imu_sequence = imu.sequence;
-      const auto &gyro = imu.value.angular_velocity_rps;
+      const auto &gyro = imu.value.angular_velocity_rad_s;
       std::cout << "imu seq=" << imu.sequence << " fresh=" << imu.fresh
-                << " age_ms=" << imu.age.count() << " gyro_rps=[" << gyro.x << ',' << gyro.y << ','
-                << gyro.z << ']';
-      if (imu.value.linear_acceleration_mps2) {
-        const auto &accel = *imu.value.linear_acceleration_mps2;
-        std::cout << " accel_mps2=[" << accel.x << ',' << accel.y << ',' << accel.z << ']';
+                << " age_ms=" << imu.age.count() << " gyro_rad_s=[" << gyro.x << ',' << gyro.y
+                << ',' << gyro.z << ']';
+      if (imu.value.linear_acceleration_m_s2) {
+        const auto &accel = *imu.value.linear_acceleration_m_s2;
+        std::cout << " accel_m_s2=[" << accel.x << ',' << accel.y << ',' << accel.z << ']';
       }
       std::cout << '\n';
     }
@@ -109,11 +109,11 @@ int main(int argc, char **argv) {
       const auto &joint0 = joints.joints[0];
       std::cout << "joints seq=" << joints.sequence << " valid_mask=0x" << std::hex
                 << joints.valid_mask << " fresh_mask=0x" << joints.fresh_mask << std::dec
-                << " joint0=[pos=" << joint0.position_rad << " vel=" << joint0.velocity_rps
+                << " joint0=[pos=" << joint0.position_rad << " vel=" << joint0.velocity_rad_s
                 << " torque=" << joint0.torque_nm << " status=" << joint0.status_code << "]\n";
     }
 
-    const brainstem::BodySnapshot body = client.latestBodyState();
+    const brainstem::BodyStateSnapshot body = client.latestBodyState();
     if (body.available && body.sequence != body_sequence) {
       body_sequence = body.sequence;
       std::cout << "body seq=" << body.sequence << " state=" << bodyStateName(body.value.kind)

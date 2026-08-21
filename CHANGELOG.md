@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- Made all angular-rate names unambiguous with `rad_s` suffixes and documented
+  the +X-forward, +Y-left, +Z-up body frame.
+- Renamed the IMU quaternion to `orientation_world_to_body` and relative sample
+  timestamps to `server_elapsed`.
+- Replaced stringly `ControlState::fsm` with typed `ControlState::body`, renamed
+  `ready` to `motion_ready`, and clarified that `motor_output_enabled` is the
+  Brainstem software output gate rather than a per-motor hardware ACK.
+- Renamed `Client::state()` to `controlState()`, `BodySnapshot` to
+  `BodyStateSnapshot`, and `TelemetryOptions::body_state` to `body`.
+- Kept telemetry startup explicit while documenting direct per-stream cached
+  getters, so callers do not need to unpack an aggregate snapshot.
+
 ## 0.4.0
 
 - Added optional body-frame IMU linear acceleration in m/s² with backward

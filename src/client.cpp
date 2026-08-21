@@ -29,12 +29,12 @@ using namespace std::chrono_literals;
 constexpr auto kMinimumCheckedWalkInterval = 20ms;
 
 bool isZero(const Velocity &velocity) noexcept {
-  return velocity.vx_mps == 0.0 && velocity.vy_mps == 0.0 && velocity.yaw_rps == 0.0;
+  return velocity.vx_mps == 0.0 && velocity.vy_mps == 0.0 && velocity.yaw_rad_s == 0.0;
 }
 
 bool isFinite(const Velocity &velocity) noexcept {
   return std::isfinite(velocity.vx_mps) && std::isfinite(velocity.vy_mps) &&
-         std::isfinite(velocity.yaw_rps);
+         std::isfinite(velocity.yaw_rad_s);
 }
 
 std::string readPem(const std::string &path, const char *label) {
@@ -142,28 +142,9 @@ Result withCachedState(Result failure, const ControlState &cached_state) {
   std::string reason = std::move(failure.state.reason);
   failure.state = cached_state;
   failure.state.connected = connected;
-  failure.state.ready = false;
+  failure.state.motion_ready = false;
   failure.state.reason = std::move(reason);
   return failure;
-}
-
-std::string fsmName(const ApiStatus &status) {
-  if (!status.has_fsm()) {
-    return "unknown";
-  }
-  switch (status.fsm().kind()) {
-    case api::v1::CMS_STATE_KIND_GROUNDED:
-      return "grounded";
-    case api::v1::CMS_STATE_KIND_STANDING:
-      return "standing";
-    case api::v1::CMS_STATE_KIND_WALKING:
-      return "walking";
-    case api::v1::CMS_STATE_KIND_TRANSITIONING:
-      return "transitioning";
-    case api::v1::CMS_STATE_KIND_ZERO:
-    default:
-      return "zero";
-  }
 }
 
 std::string ownerName(api::v1::ControlOwner owner) {
@@ -244,7 +225,7 @@ MotorStatus decodeMotorStatus(const api::v1::MotorStatusResponse &source) {
     motor.temperature_c = source_motor.temperature();
     motor.voltage_v = source_motor.voltage();
     motor.position_rad = source_motor.position();
-    motor.velocity_rps = source_motor.velocity();
+    motor.velocity_rad_s = source_motor.velocity();
     motor.torque_nm = source_motor.torque();
     motor.errors.assign(source_motor.errors().begin(), source_motor.errors().end());
     status.motors.push_back(std::move(motor));
@@ -258,22 +239,22 @@ std::chrono::nanoseconds decodeDuration(const google::protobuf::Duration &source
 
 ImuSample decodeImu(const api::v1::Imu &source) {
   ImuSample sample;
-  sample.angular_velocity_rps = {source.gyroscope().x(), source.gyroscope().y(),
-                                 source.gyroscope().z()};
+  sample.angular_velocity_rad_s = {source.gyroscope().x(), source.gyroscope().y(),
+                                   source.gyroscope().z()};
   if (source.has_linear_acceleration()) {
-    sample.linear_acceleration_mps2 =
+    sample.linear_acceleration_m_s2 =
         Vector3{source.linear_acceleration().x(), source.linear_acceleration().y(),
                 source.linear_acceleration().z()};
   }
-  sample.orientation = {source.quaternion().w(), source.quaternion().x(), source.quaternion().y(),
-                        source.quaternion().z()};
-  sample.elapsed = decodeDuration(source.timestamp());
+  sample.orientation_world_to_body = {source.quaternion().w(), source.quaternion().x(),
+                                      source.quaternion().y(), source.quaternion().z()};
+  sample.server_elapsed = decodeDuration(source.timestamp());
   return sample;
 }
 
 JointSample decodeJoint(const api::v1::Joint &source) {
   JointSample sample;
-  sample.elapsed = decodeDuration(source.timestamp());
+  sample.server_elapsed = decodeDuration(source.timestamp());
   if (source.has_single_joint()) {
     const api::v1::SingleJoint &source_joint = source.single_joint();
     sample.joints.push_back({source_joint.id(), source_joint.position(), source_joint.velocity(),
@@ -307,26 +288,28 @@ ControlState decodeStatus(const ApiStatus &status, RejectReason reason, const Co
   const bool owned_by_client =
       status.owner() == api::v1::CONTROL_OWNER_GRPC && status.owner_id() == config.client_id;
   state.connected = connected;
-  state.motors_enabled = status.motor_output_enabled();
-  state.critical_fault = status.critical_motor_fault();
+  state.motor_output_enabled = status.motor_output_enabled();
+  state.critical_motor_fault = status.critical_motor_fault();
   state.lease_valid = has_lease_token && status.grpc_lease_active() && owned_by_client;
   state.initial_zero_acknowledged = initial_zero_acknowledged;
   state.lease_remaining_ms = status.lease_remaining_ms();
-  state.accepted_sequence = status.last_accepted_sequence();
+  state.last_accepted_sequence = status.last_accepted_sequence();
   state.accepted_count = status.accepted_count();
   state.rejected_count = status.rejected_count();
-  state.fsm = fsmName(status);
+  state.body = status.has_fsm() ? decodeBodyState(status.fsm()) : BodyState{};
   state.reason = reasonName(reason);
   state.control_owner = ownerName(status.owner());
   state.control_owner_id = status.owner_id();
-  state.ready = connected && status.ready_for_walk() && state.lease_valid &&
-                state.initial_zero_acknowledged && state.motors_enabled && !state.critical_fault &&
-                (state.fsm == "standing" || state.fsm == "walking");
+  const bool body_ready =
+      state.body.kind == BodyStateKind::Standing || state.body.kind == BodyStateKind::Walking;
+  state.motion_ready = connected && status.ready_for_walk() && state.lease_valid &&
+                       state.initial_zero_acknowledged && state.motor_output_enabled &&
+                       !state.critical_motor_fault && body_ready;
 
-  if (!state.ready && state.reason == "none") {
-    if (state.critical_fault) {
+  if (!state.motion_ready && state.reason == "none") {
+    if (state.critical_motor_fault) {
       state.reason = "motor_fault";
-    } else if (!state.motors_enabled) {
+    } else if (!state.motor_output_enabled) {
       state.reason = "motors_disabled";
     } else if (!state.lease_valid) {
       if (!status.grpc_lease_active()) {
@@ -338,7 +321,7 @@ ControlState decodeStatus(const ApiStatus &status, RejectReason reason, const Co
       }
     } else if (!state.initial_zero_acknowledged) {
       state.reason = "initial_zero_required";
-    } else if (state.fsm != "standing" && state.fsm != "walking") {
+    } else if (!body_ready) {
       state.reason = "fsm_not_ready";
     } else {
       state.reason = "not_ready";
@@ -376,14 +359,14 @@ struct Client::Impl {
   bool imu_available{false};
   std::unique_ptr<Subscription> joint_subscription;
   std::array<JointState, kJointCount> latest_joints{};
-  std::array<std::chrono::nanoseconds, kJointCount> joint_elapsed{};
+  std::array<std::chrono::nanoseconds, kJointCount> joint_server_elapsed{};
   std::array<std::chrono::steady_clock::time_point, kJointCount> joint_received_at{};
   std::uint16_t joint_valid_mask{0};
   std::uint64_t joint_sequence{0};
-  std::unique_ptr<Subscription> cms_subscription;
-  BodyState latest_cms;
-  std::uint64_t cms_sequence{0};
-  bool cms_available{false};
+  std::unique_ptr<Subscription> body_subscription;
+  BodyState latest_body;
+  std::uint64_t body_sequence{0};
+  bool body_available{false};
 
   void setDeadline(grpc::ClientContext &context) const {
     context.set_deadline(std::chrono::system_clock::now() + config.timeout);
@@ -412,7 +395,7 @@ struct Client::Impl {
   Result rememberFailure(Result failure, bool preserve_lease_token) {
     ControlState state = last_state;
     state.connected = failure.state.connected;
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = false;
     state.initial_zero_acknowledged = false;
     state.reason = failure.state.reason;
@@ -610,7 +593,7 @@ Result Client::refresh() {
       impl_->clearLease();
     }
     ControlState state = impl_->remember(lease.status(), lease.reason(), true);
-    state.ready = false;
+    state.motion_ready = false;
     if (!preserve_token) {
       state.lease_valid = false;
       state.initial_zero_acknowledged = false;
@@ -621,7 +604,7 @@ Result Client::refresh() {
   if (lease.token().empty()) {
     impl_->clearLease();
     ControlState state = impl_->remember(lease.status(), lease.reason(), true);
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = false;
     state.initial_zero_acknowledged = false;
     state.reason = "lease_token_missing";
@@ -641,22 +624,27 @@ Result Client::refresh() {
     return move(Velocity{});
   }
 
-  state.ready = state.ready && impl_->initial_zero_acknowledged;
+  state.motion_ready = state.motion_ready && impl_->initial_zero_acknowledged;
   impl_->last_state = state;
-  return {state.ready, true, true, false, state, state.ready ? std::string{} : state.reason};
+  return {state.motion_ready,
+          true,
+          true,
+          false,
+          state,
+          state.motion_ready ? std::string{} : state.reason};
 }
 
 Result Client::move(const Velocity &velocity) {
   if (!isFinite(velocity)) {
     ControlState state = impl_->last_state;
-    state.ready = false;
+    state.motion_ready = false;
     state.reason = "invalid_velocity";
     impl_->last_state = state;
     return {false, false, false, false, state, state.reason};
   }
   if (impl_->lease_token.empty()) {
     ControlState state = impl_->last_state;
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = false;
     state.initial_zero_acknowledged = false;
     state.reason = "lease_missing";
@@ -666,7 +654,7 @@ Result Client::move(const Velocity &velocity) {
   if (!impl_->initial_zero_acknowledged && !isZero(velocity)) {
     ControlState state = impl_->last_state;
     state.connected = true;
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = true;
     state.initial_zero_acknowledged = false;
     state.reason = "initial_zero_required";
@@ -688,7 +676,7 @@ Result Client::move(const Velocity &velocity) {
   request.set_sequence(++impl_->sequence);
   request.mutable_direction()->set_x(velocity.vx_mps);
   request.mutable_direction()->set_y(velocity.vy_mps);
-  request.mutable_direction()->set_z(velocity.yaw_rps);
+  request.mutable_direction()->set_z(velocity.yaw_rad_s);
 
   api::v1::CommandAck response;
   grpc::Status status;
@@ -723,7 +711,7 @@ Result Client::move(const Velocity &velocity) {
       impl_->clearLease();
     }
     ControlState state = impl_->remember(response.status(), response.reason(), true);
-    state.ready = false;
+    state.motion_ready = false;
     if (!preserve_token) {
       state.lease_valid = false;
       state.initial_zero_acknowledged = false;
@@ -747,7 +735,7 @@ Result Client::move(const Velocity &velocity) {
       impl_->clearLease();
     }
     state = impl_->remember(response.status(), response.reason(), true);
-    state.ready = false;
+    state.motion_ready = false;
     if (!preserve_token) {
       state.lease_valid = false;
       state.initial_zero_acknowledged = false;
@@ -758,7 +746,12 @@ Result Client::move(const Velocity &velocity) {
 
   impl_->last_state = state;
   impl_->sequence_uncertain = false;
-  return {state.ready, true, true, false, state, state.ready ? std::string{} : state.reason};
+  return {state.motion_ready,
+          true,
+          true,
+          false,
+          state,
+          state.motion_ready ? std::string{} : state.reason};
 }
 
 Result Client::stop() noexcept {
@@ -775,7 +768,7 @@ Result Client::stop() noexcept {
         synchronized.ok = false;
         synchronized.accepted = false;
         synchronized.stop_confirmed = false;
-        synchronized.state.ready = false;
+        synchronized.state.motion_ready = false;
         if (synchronized.state.reason.empty() || synchronized.state.reason == "none") {
           synchronized.state.reason = "stop_sequence_unresolved";
         }
@@ -791,7 +784,7 @@ Result Client::stop() noexcept {
     if (!zero.transport_ok || !zero.accepted) {
       zero.ok = false;
       zero.stop_confirmed = false;
-      zero.state.ready = false;
+      zero.state.motion_ready = false;
       if (zero.state.reason.empty()) {
         zero.state.reason = "stop_unconfirmed";
       }
@@ -818,7 +811,7 @@ Result Client::stop() noexcept {
       }
       ControlState state = zero.state;
       state.connected = failure.state.connected;
-      state.ready = false;
+      state.motion_ready = false;
       state.lease_valid = false;
       state.initial_zero_acknowledged = false;
       state.reason = "release_transport_error";
@@ -835,7 +828,7 @@ Result Client::stop() noexcept {
       impl_->clearLease();
     }
     ControlState state = impl_->remember(response, response.last_decision(), true);
-    state.ready = false;
+    state.motion_ready = false;
     if (!preserve_token) {
       state.lease_valid = false;
       state.initial_zero_acknowledged = false;
@@ -846,7 +839,7 @@ Result Client::stop() noexcept {
   } catch (const std::exception &error) {
     impl_->requireSafetyZero();
     ControlState state = impl_->last_state;
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = false;
     state.initial_zero_acknowledged = false;
     state.reason = "stop_exception";
@@ -855,7 +848,7 @@ Result Client::stop() noexcept {
   } catch (...) {
     impl_->requireSafetyZero();
     ControlState state = impl_->last_state;
-    state.ready = false;
+    state.motion_ready = false;
     state.lease_valid = false;
     state.initial_zero_acknowledged = false;
     state.reason = "stop_exception";
@@ -893,7 +886,7 @@ Result Client::setJointZero() {
 
   ControlState state = impl_->last_state;
   state.connected = true;
-  state.ready = false;
+  state.motion_ready = false;
   state.lease_valid = false;
   state.initial_zero_acknowledged = false;
   state.reason = "joint_zero_set";
@@ -905,7 +898,7 @@ Result Client::clearMotorFaults(const std::vector<std::uint32_t> &joint_ids) {
   for (const std::uint32_t joint_id : joint_ids) {
     if (joint_id >= kJointCount) {
       ControlState state = impl_->last_state;
-      state.ready = false;
+      state.motion_ready = false;
       state.reason = "invalid_joint_id";
       return {false, false, false, false, state, state.reason};
     }
@@ -928,11 +921,11 @@ Result Client::clearMotorFaults(const std::vector<std::uint32_t> &joint_ids) {
   impl_->clearLease();
   ControlState state = impl_->last_state;
   state.connected = true;
-  state.ready = false;
+  state.motion_ready = false;
   state.lease_valid = false;
   state.initial_zero_acknowledged = false;
   if (joint_ids.empty()) {
-    state.motors_enabled = false;
+    state.motor_output_enabled = false;
   }
   state.reason = "motor_fault_clear_accepted";
   impl_->last_state = state;
@@ -963,8 +956,8 @@ Result Client::motorPower(bool enable) {
   impl_->clearLease();
   ControlState state = impl_->last_state;
   state.connected = true;
-  state.ready = false;
-  state.motors_enabled = enable;
+  state.motion_ready = false;
+  state.motor_output_enabled = enable;
   state.lease_valid = false;
   state.initial_zero_acknowledged = false;
   state.reason = enable ? "motors_enabled" : "motors_disabled";
@@ -995,7 +988,7 @@ Result Client::bodyAction(bool stand) {
     if (failure.transport_ok) {
       failure.state = impl_->last_state;
       failure.state.connected = true;
-      failure.state.ready = false;
+      failure.state.motion_ready = false;
       failure.state.reason = "body_action_rejected";
     }
     impl_->last_state = failure.state;
@@ -1004,12 +997,16 @@ Result Client::bodyAction(bool stand) {
 
   ControlState state = impl_->last_state;
   state.connected = true;
-  state.ready = false;
+  state.motion_ready = false;
   state.lease_valid = false;
   state.initial_zero_acknowledged = false;
-  const bool already_in_target =
-      (stand && state.fsm == "standing") || (!stand && state.fsm == "grounded");
-  state.fsm = already_in_target ? (stand ? "standing" : "grounded") : "transitioning";
+  const bool already_in_target = (stand && state.body.kind == BodyStateKind::Standing) ||
+                                 (!stand && state.body.kind == BodyStateKind::Grounded);
+  state.body.kind = already_in_target ? (stand ? BodyStateKind::Standing : BodyStateKind::Grounded)
+                                      : BodyStateKind::Transitioning;
+  state.body.transition = already_in_target
+                              ? BodyTransition::None
+                              : (stand ? BodyTransition::StandUp : BodyTransition::SitDown);
   state.reason = std::string("body_action_accepted:") + (stand ? "stand_up" : "sit_down");
   impl_->last_state = state;
   return {true, true, true, false, state, {}};
@@ -1125,7 +1122,7 @@ Result Client::startTelemetry(TelemetryOptions options) {
             throw std::runtime_error("joint telemetry id is out of range");
           }
           state->latest_joints[joint.id] = joint;
-          state->joint_elapsed[joint.id] = sample.elapsed;
+          state->joint_server_elapsed[joint.id] = sample.server_elapsed;
           state->joint_received_at[joint.id] = received_at;
           state->joint_valid_mask |= static_cast<std::uint16_t>(1U << joint.id);
         }
@@ -1135,25 +1132,25 @@ Result Client::startTelemetry(TelemetryOptions options) {
     });
   }
 
-  if (!options.body_state) {
-    impl_->cms_subscription.reset();
+  if (!options.body) {
+    impl_->body_subscription.reset();
     std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
-    impl_->cms_available = false;
-    impl_->cms_sequence = 0;
-  } else if (!impl_->cms_subscription || !impl_->cms_subscription->active()) {
-    impl_->cms_subscription.reset();
+    impl_->body_available = false;
+    impl_->body_sequence = 0;
+  } else if (!impl_->body_subscription || !impl_->body_subscription->active()) {
+    impl_->body_subscription.reset();
     {
       std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
-      impl_->cms_available = false;
-      impl_->cms_sequence = 0;
+      impl_->body_available = false;
+      impl_->body_sequence = 0;
     }
     Impl *const state = impl_.get();
-    impl_->cms_subscription = subscribeBodyState([state](const BodyState &cms) {
+    impl_->body_subscription = subscribeBodyState([state](const BodyState &body) {
       {
         std::lock_guard<std::mutex> lock(state->telemetry_mutex);
-        state->latest_cms = cms;
-        state->cms_available = true;
-        ++state->cms_sequence;
+        state->latest_body = body;
+        state->body_available = true;
+        ++state->body_sequence;
       }
       state->telemetry_changed.notify_all();
     });
@@ -1163,11 +1160,11 @@ Result Client::startTelemetry(TelemetryOptions options) {
   const bool ready = impl_->telemetry_changed.wait_for(data_lock, impl_->config.timeout, [&] {
     return (!options.imu || impl_->imu_available) &&
            (!options.joints || impl_->joint_valid_mask != 0) &&
-           (!options.body_state || impl_->cms_available);
+           (!options.body || impl_->body_available);
   });
   ControlState state = impl_->last_state;
   if (!ready) {
-    state.ready = false;
+    state.motion_ready = false;
     state.reason = "telemetry_timeout";
     return {false, false, false, false, state, state.reason};
   }
@@ -1181,14 +1178,14 @@ void Client::stopTelemetry() noexcept {
   std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
   impl_->imu_subscription.reset();
   impl_->joint_subscription.reset();
-  impl_->cms_subscription.reset();
+  impl_->body_subscription.reset();
   std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
   impl_->imu_available = false;
   impl_->imu_sequence = 0;
   impl_->joint_valid_mask = 0;
   impl_->joint_sequence = 0;
-  impl_->cms_available = false;
-  impl_->cms_sequence = 0;
+  impl_->body_available = false;
+  impl_->body_sequence = 0;
 }
 
 TelemetrySnapshot Client::telemetry() const {
@@ -1211,7 +1208,7 @@ TelemetrySnapshot Client::telemetry() const {
   snapshot.joints.valid_mask = impl_->joint_valid_mask;
   snapshot.joints.sequence = impl_->joint_sequence;
   snapshot.joints.joints = impl_->latest_joints;
-  snapshot.joints.elapsed = impl_->joint_elapsed;
+  snapshot.joints.server_elapsed = impl_->joint_server_elapsed;
   const auto now = std::chrono::steady_clock::now();
   for (std::size_t id = 0; id < kJointCount; ++id) {
     const std::uint16_t bit = static_cast<std::uint16_t>(1U << id);
@@ -1220,10 +1217,10 @@ TelemetrySnapshot Client::telemetry() const {
       snapshot.joints.fresh_mask |= bit;
     }
   }
-  snapshot.body.active = impl_->cms_subscription && impl_->cms_subscription->active();
-  snapshot.body.available = impl_->cms_available;
-  snapshot.body.sequence = impl_->cms_sequence;
-  snapshot.body.value = impl_->latest_cms;
+  snapshot.body.active = impl_->body_subscription && impl_->body_subscription->active();
+  snapshot.body.available = impl_->body_available;
+  snapshot.body.sequence = impl_->body_sequence;
+  snapshot.body.value = impl_->latest_body;
   return snapshot;
 }
 
@@ -1231,7 +1228,7 @@ ImuSnapshot Client::latestImu() const { return telemetry().imu; }
 
 JointSnapshot Client::latestJoints() const { return telemetry().joints; }
 
-BodySnapshot Client::latestBodyState() const { return telemetry().body; }
+BodyStateSnapshot Client::latestBodyState() const { return telemetry().body; }
 
 std::unique_ptr<Subscription> Client::subscribeImu(std::function<void(const ImuSample &)> handler) {
   if (!handler) {
@@ -1297,6 +1294,6 @@ std::unique_ptr<Subscription> Client::subscribeBodyState(
       new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
 }
 
-ControlState Client::state() const { return impl_ ? impl_->last_state : ControlState{}; }
+ControlState Client::controlState() const { return impl_ ? impl_->last_state : ControlState{}; }
 
 }  // namespace brainstem

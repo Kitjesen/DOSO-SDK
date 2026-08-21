@@ -104,8 +104,10 @@ int main(int argc, char **argv) {
     std::cerr << "command failed: " << result.state.reason << " " << result.error << '\n';
     return 1;
   }
-  std::cout << "accepted=" << result.accepted << " motors_enabled=" << result.state.motors_enabled
-            << " lease_valid=" << result.state.lease_valid << " state=" << result.state.fsm
+  std::cout << "accepted=" << result.accepted
+            << " motor_output_enabled=" << result.state.motor_output_enabled
+            << " lease_valid=" << result.state.lease_valid
+            << " body_state=" << static_cast<int>(result.state.body.kind)
             << " reason=" << result.state.reason << '\n';
   return result.accepted ? 0 : 1;
 }

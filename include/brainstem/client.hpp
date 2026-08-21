@@ -57,12 +57,12 @@ class Client final {
   [[nodiscard]] TelemetrySnapshot telemetry() const;
   [[nodiscard]] ImuSnapshot latestImu() const;
   [[nodiscard]] JointSnapshot latestJoints() const;
-  [[nodiscard]] BodySnapshot latestBodyState() const;
+  [[nodiscard]] BodyStateSnapshot latestBodyState() const;
   std::unique_ptr<Subscription> subscribeImu(std::function<void(const ImuSample &)> handler);
   std::unique_ptr<Subscription> subscribeJoints(std::function<void(const JointSample &)> handler);
   std::unique_ptr<Subscription> subscribeBodyState(std::function<void(const BodyState &)> handler);
 
-  [[nodiscard]] ControlState state() const;
+  [[nodiscard]] ControlState controlState() const;
 
  private:
   Result bodyAction(bool stand);
