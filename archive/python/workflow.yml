@@ -1,0 +1,68 @@
+# Archived reference; this file is outside .github/workflows and is not active CI.
+name: DOSO Python SDK archive
+
+on:
+  workflow_dispatch:
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: archive/python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install SDK and development tools
+        run: python -m pip install ".[dev]"
+
+      - name: Check and test Python SDK
+        run: |
+          python -m ruff check src tests examples
+          python -m pytest
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Install wheel in a clean environment
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import venv
+
+          wheel = next(Path("dist").glob("doso_sdk-*.whl")).resolve()
+          with tempfile.TemporaryDirectory() as directory:
+              environment = Path(directory) / "venv"
+              venv.EnvBuilder(with_pip=True).create(environment)
+              executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+              env = os.environ.copy()
+              env.pop("PYTHONPATH", None)
+              subprocess.run(
+                  [str(executable), "-m", "pip", "install", "--no-deps", str(wheel)],
+                  cwd=directory, env=env, check=True,
+              )
+              subprocess.run(
+                  [str(executable), "-I", "-c", (
+                      "import doso; from doso import DosoClient; "
+                      "from importlib.metadata import version, requires; "
+                      "from pathlib import Path; import sys; "
+                      "assert version('doso-sdk') == '0.1.0a1'; "
+                      "assert Path(doso.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); "
+                      "assert not any('extra ==' not in item for item in (requires('doso-sdk') or [])); "
+                      "print('Installed wheel import OK')"
+                  )],
+                  cwd=directory, env=env, check=True,
+              )
+          PY

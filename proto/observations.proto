@@ -1,0 +1,19 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/observations.proto";
+
+service Observations {
+  rpc Scene(Empty) returns (Snapshot);
+  rpc CameraStatus(Empty) returns (Snapshot);
+  rpc WatchImu(Empty) returns (stream ImuSample);
+  rpc WatchJoints(Empty) returns (stream JointSample);
+  rpc Motors(Empty) returns (MotorStates);
+  rpc MotorVoltages(Empty) returns (MotorVoltagesResponse);
+  rpc CameraFrame(Empty) returns (.doso.v1.CameraFrame);
+  rpc WatchCamera(Empty) returns (stream .doso.v1.CameraFrame);
+  rpc CameraSample(Empty) returns (.doso.v1.CameraSample);
+  rpc WatchCameraSamples(Empty) returns (stream .doso.v1.CameraSample);
+  rpc WatchPointCloud(CloudRequest) returns (stream CloudFrame);
+}

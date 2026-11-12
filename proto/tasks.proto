@@ -1,0 +1,12 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/tasks.proto";
+
+service Tasks {
+  rpc Send(Instruction) returns (Receipt);
+  rpc Get(RunQuery) returns (Run);
+  rpc Watch(RunQuery) returns (stream Run);
+  rpc Cancel(CancelRun) returns (Receipt);
+}

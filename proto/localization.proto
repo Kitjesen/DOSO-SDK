@@ -1,0 +1,15 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/localization.proto";
+
+service Localization {
+  rpc Status(Empty) returns (Snapshot);
+  rpc State(Empty) returns (LocalizationState);
+  rpc Pose(Empty) returns (PoseSample);
+  rpc WatchPose(Empty) returns (stream PoseSample);
+  rpc Location(Empty) returns (GeographicLocation);
+  rpc WatchLocation(Empty) returns (stream GeographicLocation);
+  rpc Relocalize(.doso.v1.Relocalize) returns (Receipt);
+}

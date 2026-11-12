@@ -1,0 +1,15 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/maps.proto";
+
+service Maps {
+  rpc List(Empty) returns (MapList);
+  rpc PointCloud(MapContentRequest) returns (stream MapContent);
+  rpc Grid(MapContentRequest) returns (MapGrid);
+  rpc Save(SaveMap) returns (Receipt);
+  rpc Operation(MapQuery) returns (MapOperation);
+  rpc Switch(SwitchProduct) returns (.doso.v1.ProductOperation);
+  rpc ProductOperation(ProductQuery) returns (.doso.v1.ProductOperation);
+}

@@ -1,0 +1,4 @@
+syntax = "proto3";
+package doso.v1;
+
+import public "messages/error.proto";

@@ -1,0 +1,34 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/motion.proto";
+import public "messages/controller.proto";
+
+service Motion {
+  rpc Controller(Empty) returns (ControllerState);
+  rpc ExternalControl(stream ExternalControlRequest) returns (stream ExternalControlReply);
+  rpc StandUp(Command) returns (Receipt);
+  rpc SitDown(Command) returns (Receipt);
+  rpc EnableMotors(Command) returns (Receipt);
+  rpc DisableMotors(Command) returns (Receipt);
+  rpc Profile(Empty) returns (ProfileInfo);
+  rpc SwitchProfile(SwitchProfileRequest) returns (Receipt);
+  rpc Stop(Command) returns (Receipt);
+  rpc StopMotion(Command) returns (Receipt);
+  rpc ClearEmergencyStop(Command) returns (Receipt);
+  rpc Resume(Command) returns (Receipt);
+  rpc ControlStatus(Empty) returns (BodyControlStatus);
+  rpc ControlState(Empty) returns (.doso.v1.ControlState);
+  rpc WatchControlState(Empty) returns (stream .doso.v1.ControlState);
+  rpc Velocity(Empty) returns (VelocitySample);
+  rpc WatchVelocity(Empty) returns (stream VelocitySample);
+  rpc Odometry(Empty) returns (OdometrySample);
+  rpc WatchOdometry(Empty) returns (stream OdometrySample);
+  rpc Status(Empty) returns (Snapshot);
+  rpc WatchState(Empty) returns (stream Snapshot);
+  rpc WatchStateAt(WatchStateRequest) returns (stream Snapshot);
+  rpc BodyState(Empty) returns (.doso.v1.BodyState);
+  rpc WatchBodyState(Empty) returns (stream .doso.v1.BodyState);
+  rpc Teleop(stream TeleopRequest) returns (stream TeleopReply);
+}

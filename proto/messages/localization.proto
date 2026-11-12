@@ -1,0 +1,67 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message PoseSample {
+  Pose pose = 1;
+  string frame_id = 2;
+  google.protobuf.Struct details = 3;
+  // Age since the robot service received odometry, not hardware sampling age.
+  optional double received_age_ms = 4;
+  optional bool fresh = 5;
+}
+
+message Relocalize {
+  Command command = 1;
+  string map_name = 2;
+  Pose initial_pose = 3;
+}
+
+enum LocalizationQuality {
+  LOCALIZATION_QUALITY_UNKNOWN = 0;
+  LOCALIZATION_QUALITY_INITIALIZING = 1;
+  LOCALIZATION_QUALITY_LOCALIZED = 2;
+  LOCALIZATION_QUALITY_LOST = 3;
+  LOCALIZATION_QUALITY_DEGRADED = 4;
+  LOCALIZATION_QUALITY_RELOCALIZING = 5;
+  LOCALIZATION_QUALITY_NO_ODOMETRY = 6;
+  LOCALIZATION_QUALITY_TRACKING = 7;
+}
+
+message LocalizationState {
+  LocalizationQuality quality = 1;
+  string map_name = 2;
+  string reason = 3;
+  SampleTime time = 4;
+  string source_state = 5;
+  optional bool ready = 6;
+  optional bool pose_fresh = 7;
+}
+
+enum GeographicState {
+  GEOGRAPHIC_STATE_UNKNOWN = 0;
+  GEOGRAPHIC_STATE_READY = 1;
+  GEOGRAPHIC_STATE_UNAVAILABLE = 2;
+  GEOGRAPHIC_STATE_NO_FIX = 3;
+  GEOGRAPHIC_STATE_STALE = 4;
+  GEOGRAPHIC_STATE_INVALID = 5;
+}
+
+message GeographicFix {
+  // WGS84 coordinates in degrees.
+  double latitude = 1;
+  double longitude = 2;
+  uint32 fix_type = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  optional double accuracy_m = 5;
+}
+
+message GeographicLocation {
+  GeographicState state = 1;
+  // Present only when state is READY.
+  GeographicFix fix = 2;
+  optional double age_s = 3;
+}

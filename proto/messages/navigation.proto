@@ -1,0 +1,53 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import "observations.proto";
+import "google/protobuf/struct.proto";
+
+message Goal {
+  Command command = 1;
+  Pose pose = 2;
+}
+
+message TaskQuery {
+  string task_id = 1;
+}
+
+message CancelTask {
+  Command command = 1;
+  string task_id = 2;
+  string reason = 3;
+}
+
+message TaskControl {
+  Command command = 1;
+  string task_id = 2;
+  string reason = 3;
+}
+
+enum TaskState {
+  TASK_UNKNOWN = 0;
+  TASK_PLANNING = 1;
+  TASK_EXECUTING = 2;
+  TASK_PAUSED = 3;
+  TASK_RECOVERING = 4;
+  TASK_SUCCESS = 5;
+  TASK_FAILED = 6;
+  TASK_CANCELLED = 7;
+}
+
+message Task {
+  string task_id = 1;
+  bool found = 2;
+  TaskState state = 3;
+  string reason = 4;
+  google.protobuf.Struct details = 5;
+  string reason_code = 6;
+}
+
+message NavigationPath {
+  string frame_id = 1;
+  repeated Vector3 points = 2;
+  SampleTime time = 3;
+}

@@ -1,0 +1,1308 @@
+#include "brainstem/client.hpp"
+#include "connection.hpp"
+
+#include <google/protobuf/empty.pb.h>
+#include <grpcpp/grpcpp.h>
+
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <fstream>
+#include <functional>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+
+#include "brainstem_api/cms.grpc.pb.h"
+
+namespace brainstem {
+namespace {
+
+using ApiStatus = api::v1::ControlStatus;
+using RejectReason = api::v1::CommandRejectReason;
+using namespace std::chrono_literals;
+
+constexpr auto kMinimumCheckedWalkInterval = 20ms;
+
+bool isZero(const Velocity &velocity) noexcept {
+  return velocity.vx_mps == 0.0 && velocity.vy_mps == 0.0 && velocity.yaw_rad_s == 0.0;
+}
+
+bool isFinite(const Velocity &velocity) noexcept {
+  return std::isfinite(velocity.vx_mps) && std::isfinite(velocity.vy_mps) &&
+         std::isfinite(velocity.yaw_rad_s);
+}
+
+std::string grpcError(const grpc::Status &status) {
+  return std::to_string(static_cast<int>(status.error_code())) + ":" + status.error_message();
+}
+
+bool retryableWalkFailure(const grpc::Status &status) noexcept {
+  return status.error_code() == grpc::StatusCode::UNAVAILABLE ||
+         status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED;
+}
+
+Result rpcFailure(const grpc::Status &status, const char *rpc_name) {
+  Result result;
+  if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED) {
+    result.transport_ok = true;
+    result.state.connected = true;
+    result.state.reason = "protocol_incompatible";
+    result.error = std::string("protocol_incompatible: required Brainstem RPC ") + rpc_name +
+                   " is not implemented";
+    return result;
+  }
+
+  switch (status.error_code()) {
+    case grpc::StatusCode::INVALID_ARGUMENT:
+    case grpc::StatusCode::FAILED_PRECONDITION:
+    case grpc::StatusCode::UNAUTHENTICATED:
+    case grpc::StatusCode::PERMISSION_DENIED:
+    case grpc::StatusCode::RESOURCE_EXHAUSTED:
+    case grpc::StatusCode::ABORTED:
+      result.transport_ok = true;
+      result.state.connected = true;
+      result.state.reason = "request_rejected";
+      break;
+    default:
+      result.state.reason = "transport_error";
+      break;
+  }
+  result.error = std::string(rpc_name) + ": " + grpcError(status);
+  return result;
+}
+
+Result withCachedState(Result failure, const ControlState &cached_state) {
+  const bool connected = failure.state.connected;
+  std::string reason = std::move(failure.state.reason);
+  failure.state = cached_state;
+  failure.state.connected = connected;
+  failure.state.motion_ready = false;
+  failure.state.reason = std::move(reason);
+  return failure;
+}
+
+std::string ownerName(api::v1::ControlOwner owner) {
+  switch (owner) {
+    case api::v1::CONTROL_OWNER_GRPC:
+      return "grpc";
+    case api::v1::CONTROL_OWNER_YUNZHUO:
+      return "yunzhuo";
+    case api::v1::CONTROL_OWNER_NONE:
+    default:
+      return "none";
+  }
+}
+
+std::string reasonName(RejectReason reason) {
+  std::string name = api::v1::CommandRejectReason_Name(reason);
+  constexpr const char *prefix = "COMMAND_REJECT_REASON_";
+  if (name.rfind(prefix, 0) == 0) {
+    name.erase(0, std::char_traits<char>::length(prefix));
+  }
+  for (char &character : name) {
+    if (character >= 'A' && character <= 'Z') {
+      character = static_cast<char>(character - 'A' + 'a');
+    }
+  }
+  return name.empty() ? "unknown" : name;
+}
+
+BodyState decodeBodyState(const api::v1::CmsState &source) {
+  BodyState state;
+  switch (source.kind()) {
+    case api::v1::CMS_STATE_KIND_ZERO:
+      state.kind = BodyStateKind::Zero;
+      break;
+    case api::v1::CMS_STATE_KIND_GROUNDED:
+      state.kind = BodyStateKind::Grounded;
+      break;
+    case api::v1::CMS_STATE_KIND_STANDING:
+      state.kind = BodyStateKind::Standing;
+      break;
+    case api::v1::CMS_STATE_KIND_WALKING:
+      state.kind = BodyStateKind::Walking;
+      break;
+    case api::v1::CMS_STATE_KIND_TRANSITIONING:
+      state.kind = BodyStateKind::Transitioning;
+      break;
+    default:
+      state.kind = BodyStateKind::Unknown;
+      break;
+  }
+  switch (source.transition()) {
+    case api::v1::CMS_TRANSITION_KIND_STAND_UP:
+      state.transition = BodyTransition::StandUp;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_SIT_DOWN:
+      state.transition = BodyTransition::SitDown;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_GESTURE:
+      state.transition = BodyTransition::Gesture;
+      break;
+    case api::v1::CMS_TRANSITION_KIND_NONE:
+    default:
+      state.transition = BodyTransition::None;
+      break;
+  }
+  state.gesture_name = source.gesture_name();
+  return state;
+}
+
+MotorStatus decodeMotorStatus(const api::v1::MotorStatusResponse &source) {
+  MotorStatus status;
+  status.motors.reserve(static_cast<std::size_t>(source.motors_size()));
+  for (const auto &source_motor : source.motors()) {
+    MotorState motor;
+    motor.id = source_motor.id();
+    motor.online = source_motor.online();
+    motor.status_code = source_motor.status_code();
+    motor.temperature_c = source_motor.temperature();
+    motor.voltage_v = source_motor.voltage();
+    motor.position_rad = source_motor.position();
+    motor.velocity_rad_s = source_motor.velocity();
+    motor.torque_nm = source_motor.torque();
+    motor.errors.assign(source_motor.errors().begin(), source_motor.errors().end());
+    status.motors.push_back(std::move(motor));
+  }
+  return status;
+}
+
+std::chrono::nanoseconds decodeDuration(const google::protobuf::Duration &source) {
+  return std::chrono::seconds(source.seconds()) + std::chrono::nanoseconds(source.nanos());
+}
+
+ImuSample decodeImu(const api::v1::Imu &source) {
+  ImuSample sample;
+  sample.angular_velocity_rad_s = {source.gyroscope().x(), source.gyroscope().y(),
+                                   source.gyroscope().z()};
+  if (source.has_linear_acceleration()) {
+    sample.linear_acceleration_m_s2 =
+        Vector3{source.linear_acceleration().x(), source.linear_acceleration().y(),
+                source.linear_acceleration().z()};
+  }
+  sample.orientation_world_to_body = {source.quaternion().w(), source.quaternion().x(),
+                                      source.quaternion().y(), source.quaternion().z()};
+  sample.server_elapsed = decodeDuration(source.timestamp());
+  return sample;
+}
+
+JointSample decodeJoint(const api::v1::Joint &source) {
+  JointSample sample;
+  sample.server_elapsed = decodeDuration(source.timestamp());
+  if (source.has_single_joint()) {
+    const api::v1::SingleJoint &source_joint = source.single_joint();
+    sample.joints.push_back({source_joint.id(), source_joint.position(), source_joint.velocity(),
+                             source_joint.torque(), source_joint.status()});
+    return sample;
+  }
+  if (!source.has_all_joints()) {
+    throw std::runtime_error("ListenJoint: sample contains no joint data");
+  }
+
+  const api::v1::AllJoints &source_joints = source.all_joints();
+  const int count = source_joints.position().values_size();
+  if (count != 16 || source_joints.velocity().values_size() != count ||
+      source_joints.torque().values_size() != count ||
+      source_joints.status().values_size() != count) {
+    throw std::runtime_error("ListenJoint: all-joints sample must contain 16 aligned values");
+  }
+  sample.joints.reserve(static_cast<std::size_t>(count));
+  for (int index = 0; index < count; ++index) {
+    sample.joints.push_back(
+        {static_cast<std::uint32_t>(index), source_joints.position().values(index),
+         source_joints.velocity().values(index), source_joints.torque().values(index),
+         source_joints.status().values(index)});
+  }
+  return sample;
+}
+
+ControlState decodeStatus(const ApiStatus &status, RejectReason reason, const Config &config,
+                          bool connected, bool has_lease_token, bool initial_zero_acknowledged) {
+  ControlState state;
+  const bool owned_by_client =
+      status.owner() == api::v1::CONTROL_OWNER_GRPC && status.owner_id() == config.client_id;
+  state.connected = connected;
+  state.motor_output_enabled = status.motor_output_enabled();
+  state.critical_motor_fault = status.critical_motor_fault();
+  state.lease_valid = has_lease_token && status.grpc_lease_active() && owned_by_client;
+  state.initial_zero_acknowledged = initial_zero_acknowledged;
+  state.lease_remaining_ms = status.lease_remaining_ms();
+  state.last_accepted_sequence = status.last_accepted_sequence();
+  state.accepted_count = status.accepted_count();
+  state.rejected_count = status.rejected_count();
+  state.body = status.has_fsm() ? decodeBodyState(status.fsm()) : BodyState{};
+  state.reason = reasonName(reason);
+  state.control_owner = ownerName(status.owner());
+  state.control_owner_id = status.owner_id();
+  const bool body_ready =
+      state.body.kind == BodyStateKind::Standing || state.body.kind == BodyStateKind::Walking;
+  state.motion_ready = connected && status.ready_for_walk() && state.lease_valid &&
+                       state.initial_zero_acknowledged && state.motor_output_enabled &&
+                       !state.critical_motor_fault && body_ready;
+
+  if (!state.motion_ready && state.reason == "none") {
+    if (state.critical_motor_fault) {
+      state.reason = "motor_fault";
+    } else if (!state.motor_output_enabled) {
+      state.reason = "motors_disabled";
+    } else if (!state.lease_valid) {
+      if (!status.grpc_lease_active()) {
+        state.reason = "lease_missing";
+      } else if (owned_by_client && !has_lease_token) {
+        state.reason = "lease_token_missing";
+      } else {
+        state.reason = "preempted";
+      }
+    } else if (!state.initial_zero_acknowledged) {
+      state.reason = "initial_zero_required";
+    } else if (!body_ready) {
+      state.reason = "fsm_not_ready";
+    } else {
+      state.reason = "not_ready";
+    }
+  }
+  return state;
+}
+
+}  // namespace
+
+struct Client::Impl {
+  explicit Impl(Config value) : config(std::move(value)) {
+    detail::validateConfig(config);
+    channel = detail::createChannel(config);
+    stub = api::v1::RobotControl::NewStub(channel);
+  }
+
+  Config config;
+  std::shared_ptr<grpc::Channel> channel;
+  std::unique_ptr<api::v1::RobotControl::Stub> stub;
+  std::string lease_token;
+  std::uint64_t sequence{0};
+  bool sequence_uncertain{false};
+  bool initial_zero_acknowledged{false};
+  bool has_sent_velocity{false};
+  std::chrono::steady_clock::time_point last_velocity_at{};
+  ControlState last_state;
+  mutable std::mutex telemetry_lifecycle_mutex;
+  mutable std::mutex telemetry_mutex;
+  std::condition_variable telemetry_changed;
+  std::unique_ptr<Subscription> imu_subscription;
+  ImuSample latest_imu;
+  std::chrono::steady_clock::time_point imu_received_at{};
+  std::uint64_t imu_sequence{0};
+  bool imu_available{false};
+  std::unique_ptr<Subscription> joint_subscription;
+  std::array<JointState, kJointCount> latest_joints{};
+  std::array<std::chrono::nanoseconds, kJointCount> joint_server_elapsed{};
+  std::array<std::chrono::steady_clock::time_point, kJointCount> joint_received_at{};
+  std::uint16_t joint_valid_mask{0};
+  std::uint64_t joint_sequence{0};
+  std::unique_ptr<Subscription> body_subscription;
+  BodyState latest_body;
+  std::uint64_t body_sequence{0};
+  bool body_available{false};
+
+  void setDeadline(grpc::ClientContext &context) const {
+    context.set_deadline(std::chrono::system_clock::now() + config.timeout);
+  }
+
+  ControlState remember(const ApiStatus &status, RejectReason reason, bool connected) {
+    last_state = decodeStatus(status, reason, config, connected, !lease_token.empty(),
+                              initial_zero_acknowledged);
+    return last_state;
+  }
+
+  void clearLease() noexcept {
+    lease_token.clear();
+    sequence_uncertain = false;
+    initial_zero_acknowledged = false;
+    has_sent_velocity = false;
+  }
+
+  void requireSafetyZero() noexcept { initial_zero_acknowledged = false; }
+
+  [[nodiscard]] bool statusConfirmsLease(const ApiStatus &status) const noexcept {
+    return !lease_token.empty() && status.grpc_lease_active() &&
+           status.owner() == api::v1::CONTROL_OWNER_GRPC && status.owner_id() == config.client_id;
+  }
+
+  Result rememberFailure(Result failure, bool preserve_lease_token) {
+    ControlState state = last_state;
+    state.connected = failure.state.connected;
+    state.motion_ready = false;
+    state.lease_valid = false;
+    state.initial_zero_acknowledged = false;
+    state.reason = failure.state.reason;
+    if (preserve_lease_token) {
+      requireSafetyZero();
+    } else {
+      clearLease();
+    }
+    failure.state = state;
+    last_state = state;
+    return failure;
+  }
+};
+
+struct Subscription::Impl {
+  explicit Impl(std::function<Result(Impl &)> operation) {
+    worker = std::thread([this, operation = std::move(operation)]() mutable {
+      try {
+        result = operation(*this);
+      } catch (const std::exception &error) {
+        result.state.reason = "subscription_error";
+        result.error = error.what();
+      } catch (...) {
+        result.state.reason = "subscription_error";
+        result.error = result.state.reason;
+      }
+      clearContext();
+      is_active.store(false);
+    });
+  }
+
+  ~Impl() {
+    cancel();
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+
+  grpc::ClientContext *beginContext() {
+    std::lock_guard<std::mutex> lock(context_mutex);
+    context = std::make_unique<grpc::ClientContext>();
+    if (cancel_requested.load()) {
+      context->TryCancel();
+    }
+    return context.get();
+  }
+
+  void clearContext() noexcept {
+    std::lock_guard<std::mutex> lock(context_mutex);
+    context.reset();
+  }
+
+  void cancel() noexcept {
+    cancel_requested.store(true);
+    std::lock_guard<std::mutex> lock(context_mutex);
+    if (context) {
+      context->TryCancel();
+    }
+  }
+
+  Result wait() {
+    if (worker.joinable()) {
+      worker.join();
+    }
+    return result;
+  }
+
+  template <typename WireSample, typename Handler, typename Start, typename Decode>
+  Result runStream(const std::shared_ptr<grpc::Channel> &channel, const ControlState &state,
+                   Handler &handler, Start start, Decode decode, const char *rpc_name) {
+    const auto stub = api::v1::RobotControl::NewStub(channel);
+    google::protobuf::Empty request;
+    grpc::ClientContext *stream_context = beginContext();
+    std::unique_ptr<grpc::ClientReader<WireSample>> reader = start(*stub, stream_context, request);
+    WireSample wire_sample;
+    while (reader->Read(&wire_sample)) {
+      const auto sample = decode(wire_sample);
+      try {
+        handler(sample);
+      } catch (...) {
+        cancel();
+        throw;
+      }
+    }
+    const grpc::Status status = reader->Finish();
+    if (status.ok() || cancel_requested.load()) {
+      return {true, true, false, false, state, {}};
+    }
+    return withCachedState(rpcFailure(status, rpc_name), state);
+  }
+
+  std::atomic_bool is_active{true};
+  std::atomic_bool cancel_requested{false};
+  std::mutex context_mutex;
+  std::unique_ptr<grpc::ClientContext> context;
+  Result result;
+  std::thread worker;
+};
+
+Subscription::Subscription(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+Subscription::~Subscription() = default;
+Subscription::Subscription(Subscription &&) noexcept = default;
+Subscription &Subscription::operator=(Subscription &&) noexcept = default;
+
+void Subscription::cancel() noexcept {
+  if (impl_) {
+    impl_->cancel();
+  }
+}
+
+bool Subscription::active() const noexcept { return impl_ && impl_->is_active.load(); }
+
+Result Subscription::wait() {
+  if (!impl_) {
+    Result result;
+    result.state.reason = "subscription_missing";
+    result.error = result.state.reason;
+    return result;
+  }
+  return impl_->wait();
+}
+
+Client::Client(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {}
+
+Client::~Client() {
+  if (impl_) {
+    stopTelemetry();
+    (void)stop();
+  }
+}
+Client::Client(Client &&) noexcept = default;
+Client &Client::operator=(Client &&other) noexcept {
+  if (this != &other) {
+    if (impl_) {
+      stopTelemetry();
+      (void)stop();
+    }
+    impl_ = std::move(other.impl_);
+  }
+  return *this;
+}
+
+Result Client::connect() {
+  google::protobuf::Empty request;
+  ApiStatus response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetControlStatus(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = rpcFailure(status, "GetControlStatus");
+    const bool preserve_token = !failure.transport_ok && !impl_->lease_token.empty();
+    return impl_->rememberFailure(std::move(failure), preserve_token);
+  }
+
+  if (!impl_->statusConfirmsLease(response)) {
+    impl_->clearLease();
+  } else {
+    impl_->sequence = response.last_accepted_sequence();
+    impl_->sequence_uncertain = false;
+  }
+  const ControlState state = impl_->remember(response, response.last_decision(), true);
+  return {true, true, false, false, state, {}};
+}
+
+Result Client::refresh() {
+  api::v1::ControlLease lease;
+  grpc::Status status;
+  const bool acquiring = impl_->lease_token.empty();
+  if (acquiring) {
+    api::v1::AcquireControlRequest request;
+    request.set_client_id(impl_->config.client_id);
+    grpc::ClientContext context;
+    impl_->setDeadline(context);
+    status = impl_->stub->AcquireControl(&context, request, &lease);
+  } else {
+    api::v1::ControlLeaseRequest request;
+    request.set_token(impl_->lease_token);
+    grpc::ClientContext context;
+    impl_->setDeadline(context);
+    status = impl_->stub->RenewControlLease(&context, request, &lease);
+  }
+
+  if (!status.ok()) {
+    Result failure = rpcFailure(status, acquiring ? "AcquireControl" : "RenewControlLease");
+    const bool preserve_token = !acquiring && !failure.transport_ok && !impl_->lease_token.empty();
+    return impl_->rememberFailure(std::move(failure), preserve_token);
+  }
+
+  if (!lease.accepted()) {
+    const bool preserve_token = !acquiring && impl_->statusConfirmsLease(lease.status());
+    if (preserve_token) {
+      impl_->requireSafetyZero();
+    } else {
+      impl_->clearLease();
+    }
+    ControlState state = impl_->remember(lease.status(), lease.reason(), true);
+    state.motion_ready = false;
+    if (!preserve_token) {
+      state.lease_valid = false;
+      state.initial_zero_acknowledged = false;
+    }
+    impl_->last_state = state;
+    return {false, true, false, false, state, state.reason};
+  }
+  if (lease.token().empty()) {
+    impl_->clearLease();
+    ControlState state = impl_->remember(lease.status(), lease.reason(), true);
+    state.motion_ready = false;
+    state.lease_valid = false;
+    state.initial_zero_acknowledged = false;
+    state.reason = "lease_token_missing";
+    impl_->last_state = state;
+    return {false, true, false, false, state, state.reason};
+  }
+
+  if (acquiring) {
+    impl_->initial_zero_acknowledged = false;
+    impl_->has_sent_velocity = false;
+  }
+  impl_->lease_token = lease.token();
+  impl_->sequence = lease.status().last_accepted_sequence();
+  impl_->sequence_uncertain = false;
+  ControlState state = impl_->remember(lease.status(), lease.reason(), true);
+  if (!impl_->initial_zero_acknowledged) {
+    return move(Velocity{});
+  }
+
+  state.motion_ready = state.motion_ready && impl_->initial_zero_acknowledged;
+  impl_->last_state = state;
+  return {state.motion_ready,
+          true,
+          true,
+          false,
+          state,
+          state.motion_ready ? std::string{} : state.reason};
+}
+
+Result Client::move(const Velocity &velocity) {
+  if (!isFinite(velocity)) {
+    ControlState state = impl_->last_state;
+    state.motion_ready = false;
+    state.reason = "invalid_velocity";
+    impl_->last_state = state;
+    return {false, false, false, false, state, state.reason};
+  }
+  if (impl_->lease_token.empty()) {
+    ControlState state = impl_->last_state;
+    state.motion_ready = false;
+    state.lease_valid = false;
+    state.initial_zero_acknowledged = false;
+    state.reason = "lease_missing";
+    impl_->last_state = state;
+    return {false, false, false, false, state, state.reason};
+  }
+  if (!impl_->initial_zero_acknowledged && !isZero(velocity)) {
+    ControlState state = impl_->last_state;
+    state.connected = true;
+    state.motion_ready = false;
+    state.lease_valid = true;
+    state.initial_zero_acknowledged = false;
+    state.reason = "initial_zero_required";
+    impl_->last_state = state;
+    return {false, false, false, false, state, state.reason};
+  }
+
+  if (impl_->has_sent_velocity) {
+    const auto earliest = impl_->last_velocity_at + kMinimumCheckedWalkInterval;
+    if (std::chrono::steady_clock::now() < earliest) {
+      std::this_thread::sleep_until(earliest);
+    }
+  }
+  impl_->last_velocity_at = std::chrono::steady_clock::now();
+  impl_->has_sent_velocity = true;
+
+  api::v1::WalkRequest request;
+  request.set_token(impl_->lease_token);
+  request.set_sequence(++impl_->sequence);
+  request.mutable_direction()->set_x(velocity.vx_mps);
+  request.mutable_direction()->set_y(velocity.vy_mps);
+  request.mutable_direction()->set_z(velocity.yaw_rad_s);
+
+  api::v1::CommandAck response;
+  grpc::Status status;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    response.Clear();
+    grpc::ClientContext context;
+    impl_->setDeadline(context);
+    status = impl_->stub->WalkChecked(&context, request, &response);
+    if (status.ok() || !retryableWalkFailure(status)) {
+      break;
+    }
+  }
+  if (!status.ok()) {
+    Result failure = rpcFailure(status, "WalkChecked");
+    const bool preserve_token = !failure.transport_ok && !impl_->lease_token.empty();
+    if (preserve_token) {
+      impl_->sequence_uncertain = true;
+    }
+    return impl_->rememberFailure(std::move(failure), preserve_token);
+  }
+
+  const bool ack_matches =
+      response.sequence() == request.sequence() &&
+      (!response.accepted() || response.status().last_accepted_sequence() == request.sequence());
+  if (!ack_matches) {
+    const bool preserve_token = impl_->statusConfirmsLease(response.status());
+    if (preserve_token) {
+      impl_->sequence = response.status().last_accepted_sequence();
+      impl_->sequence_uncertain = false;
+      impl_->requireSafetyZero();
+    } else {
+      impl_->clearLease();
+    }
+    ControlState state = impl_->remember(response.status(), response.reason(), true);
+    state.motion_ready = false;
+    if (!preserve_token) {
+      state.lease_valid = false;
+      state.initial_zero_acknowledged = false;
+    }
+    state.reason = "ack_sequence_mismatch";
+    impl_->last_state = state;
+    return {false, true, false, false, state, state.reason};
+  }
+
+  if (response.accepted() && !impl_->initial_zero_acknowledged && isZero(velocity)) {
+    impl_->initial_zero_acknowledged = true;
+  }
+  ControlState state = impl_->remember(response.status(), response.reason(), true);
+  if (!response.accepted()) {
+    const bool preserve_token = impl_->statusConfirmsLease(response.status());
+    if (preserve_token) {
+      impl_->sequence = response.status().last_accepted_sequence();
+      impl_->sequence_uncertain = false;
+      impl_->requireSafetyZero();
+    } else {
+      impl_->clearLease();
+    }
+    state = impl_->remember(response.status(), response.reason(), true);
+    state.motion_ready = false;
+    if (!preserve_token) {
+      state.lease_valid = false;
+      state.initial_zero_acknowledged = false;
+    }
+    impl_->last_state = state;
+    return {false, true, false, false, state, state.reason};
+  }
+
+  impl_->last_state = state;
+  impl_->sequence_uncertain = false;
+  return {state.motion_ready,
+          true,
+          true,
+          false,
+          state,
+          state.motion_ready ? std::string{} : state.reason};
+}
+
+Result Client::stop() noexcept {
+  ControlState unavailable;
+  unavailable.reason = "lease_missing";
+  if (!impl_ || impl_->lease_token.empty()) {
+    return {false, false, false, false, unavailable, unavailable.reason};
+  }
+
+  try {
+    if (impl_->sequence_uncertain) {
+      Result synchronized = connect();
+      if (!synchronized.ok || impl_->lease_token.empty()) {
+        synchronized.ok = false;
+        synchronized.accepted = false;
+        synchronized.stop_confirmed = false;
+        synchronized.state.motion_ready = false;
+        if (synchronized.state.reason.empty() || synchronized.state.reason == "none") {
+          synchronized.state.reason = "stop_sequence_unresolved";
+        }
+        if (synchronized.error.empty()) {
+          synchronized.error = synchronized.state.reason;
+        }
+        impl_->last_state = synchronized.state;
+        return synchronized;
+      }
+    }
+
+    Result zero = move(Velocity{});
+    if (!zero.transport_ok || !zero.accepted) {
+      zero.ok = false;
+      zero.stop_confirmed = false;
+      zero.state.motion_ready = false;
+      if (zero.state.reason.empty()) {
+        zero.state.reason = "stop_unconfirmed";
+      }
+      if (zero.error.empty()) {
+        zero.error = zero.state.reason;
+      }
+      impl_->last_state = zero.state;
+      return zero;
+    }
+
+    api::v1::ControlLeaseRequest request;
+    request.set_token(impl_->lease_token);
+    ApiStatus response;
+    grpc::ClientContext context;
+    impl_->setDeadline(context);
+    const grpc::Status status = impl_->stub->ReleaseControl(&context, request, &response);
+    if (!status.ok()) {
+      Result failure = rpcFailure(status, "ReleaseControl");
+      const bool preserve_token = !failure.transport_ok;
+      if (preserve_token) {
+        impl_->requireSafetyZero();
+      } else {
+        impl_->clearLease();
+      }
+      ControlState state = zero.state;
+      state.connected = failure.state.connected;
+      state.motion_ready = false;
+      state.lease_valid = false;
+      state.initial_zero_acknowledged = false;
+      state.reason = "release_transport_error";
+      impl_->last_state = state;
+      return {false, failure.transport_ok, false, false, state, failure.error};
+    }
+
+    const bool released =
+        !response.grpc_lease_active() && response.owner_id() != impl_->config.client_id;
+    const bool preserve_token = !released && impl_->statusConfirmsLease(response);
+    if (preserve_token) {
+      impl_->requireSafetyZero();
+    } else {
+      impl_->clearLease();
+    }
+    ControlState state = impl_->remember(response, response.last_decision(), true);
+    state.motion_ready = false;
+    if (!preserve_token) {
+      state.lease_valid = false;
+      state.initial_zero_acknowledged = false;
+    }
+    state.reason = released ? "stop_confirmed" : "release_unconfirmed";
+    impl_->last_state = state;
+    return {released, true, released, released, state, released ? std::string{} : state.reason};
+  } catch (const std::exception &error) {
+    impl_->requireSafetyZero();
+    ControlState state = impl_->last_state;
+    state.motion_ready = false;
+    state.lease_valid = false;
+    state.initial_zero_acknowledged = false;
+    state.reason = "stop_exception";
+    impl_->last_state = state;
+    return {false, false, false, false, state, error.what()};
+  } catch (...) {
+    impl_->requireSafetyZero();
+    ControlState state = impl_->last_state;
+    state.motion_ready = false;
+    state.lease_valid = false;
+    state.initial_zero_acknowledged = false;
+    state.reason = "stop_exception";
+    impl_->last_state = state;
+    return {false, false, false, false, state, state.reason};
+  }
+}
+
+Result Client::standUp() { return bodyAction(true); }
+
+Result Client::sitDown() { return bodyAction(false); }
+
+Result Client::enableMotors() { return motorPower(true); }
+
+Result Client::disableMotors() { return motorPower(false); }
+
+Result Client::setJointZero() {
+  if (!impl_->lease_token.empty()) {
+    Result stopped = stop();
+    if (!stopped.confirmsStop()) {
+      return stopped;
+    }
+  }
+
+  google::protobuf::Empty request;
+  google::protobuf::Empty response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->SetZero(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = withCachedState(rpcFailure(status, "SetZero"), impl_->last_state);
+    impl_->last_state = failure.state;
+    return failure;
+  }
+
+  ControlState state = impl_->last_state;
+  state.connected = true;
+  state.motion_ready = false;
+  state.lease_valid = false;
+  state.initial_zero_acknowledged = false;
+  state.reason = "joint_zero_set";
+  impl_->last_state = state;
+  return {true, true, true, false, state, {}};
+}
+
+Result Client::clearMotorFaults(const std::vector<std::uint32_t> &joint_ids) {
+  for (const std::uint32_t joint_id : joint_ids) {
+    if (joint_id >= kJointCount) {
+      ControlState state = impl_->last_state;
+      state.motion_ready = false;
+      state.reason = "invalid_joint_id";
+      return {false, false, false, false, state, state.reason};
+    }
+  }
+
+  api::v1::ClearFaultRequest request;
+  for (const std::uint32_t joint_id : joint_ids) {
+    request.add_joint_ids(joint_id);
+  }
+  google::protobuf::Empty response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->ClearMotorFault(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = withCachedState(rpcFailure(status, "ClearMotorFault"), impl_->last_state);
+    impl_->last_state = failure.state;
+    return failure;
+  }
+
+  impl_->clearLease();
+  ControlState state = impl_->last_state;
+  state.connected = true;
+  state.motion_ready = false;
+  state.lease_valid = false;
+  state.initial_zero_acknowledged = false;
+  if (joint_ids.empty()) {
+    state.motor_output_enabled = false;
+  }
+  state.reason = "motor_fault_clear_accepted";
+  impl_->last_state = state;
+  return {true, true, true, false, state, {}};
+}
+
+Result Client::motorPower(bool enable) {
+  if (enable && !impl_->lease_token.empty()) {
+    Result stopped = stop();
+    if (!stopped.confirmsStop()) {
+      return stopped;
+    }
+  }
+
+  google::protobuf::Empty request;
+  google::protobuf::Empty response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const char *rpc_name = enable ? "Enable" : "Disable";
+  const grpc::Status status = enable ? impl_->stub->Enable(&context, request, &response)
+                                     : impl_->stub->Disable(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = withCachedState(rpcFailure(status, rpc_name), impl_->last_state);
+    impl_->last_state = failure.state;
+    return failure;
+  }
+
+  impl_->clearLease();
+  ControlState state = impl_->last_state;
+  state.connected = true;
+  state.motion_ready = false;
+  state.motor_output_enabled = enable;
+  state.lease_valid = false;
+  state.initial_zero_acknowledged = false;
+  state.reason = enable ? "motors_enabled" : "motors_disabled";
+  impl_->last_state = state;
+  return {true, true, true, false, state, {}};
+}
+
+Result Client::bodyAction(bool stand) {
+  if (!impl_->lease_token.empty()) {
+    Result stopped = stop();
+    if (!stopped.confirmsStop()) {
+      if (stopped.error.empty()) {
+        stopped.error = "body_action_stop_unconfirmed";
+      }
+      return stopped;
+    }
+  }
+
+  google::protobuf::Empty request;
+  google::protobuf::Empty response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const char *rpc_name = stand ? "StandUp" : "SitDown";
+  const grpc::Status status = stand ? impl_->stub->StandUp(&context, request, &response)
+                                    : impl_->stub->SitDown(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = rpcFailure(status, rpc_name);
+    if (failure.transport_ok) {
+      failure.state = impl_->last_state;
+      failure.state.connected = true;
+      failure.state.motion_ready = false;
+      failure.state.reason = "body_action_rejected";
+    }
+    impl_->last_state = failure.state;
+    return failure;
+  }
+
+  ControlState state = impl_->last_state;
+  state.connected = true;
+  state.motion_ready = false;
+  state.lease_valid = false;
+  state.initial_zero_acknowledged = false;
+  const bool already_in_target = (stand && state.body.kind == BodyStateKind::Standing) ||
+                                 (!stand && state.body.kind == BodyStateKind::Grounded);
+  state.body.kind = already_in_target ? (stand ? BodyStateKind::Standing : BodyStateKind::Grounded)
+                                      : BodyStateKind::Transitioning;
+  state.body.transition = already_in_target
+                              ? BodyTransition::None
+                              : (stand ? BodyTransition::StandUp : BodyTransition::SitDown);
+  state.reason = std::string("body_action_accepted:") + (stand ? "stand_up" : "sit_down");
+  impl_->last_state = state;
+  return {true, true, true, false, state, {}};
+}
+
+Response<ControlState> Client::getControlStatus() {
+  google::protobuf::Empty request;
+  ApiStatus response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetControlStatus(&context, request, &response);
+  if (!status.ok()) {
+    return {rpcFailure(status, "GetControlStatus"), {}};
+  }
+  const ControlState snapshot =
+      decodeStatus(response, response.last_decision(), impl_->config, true,
+                   !impl_->lease_token.empty(), impl_->initial_zero_acknowledged);
+  return {{true, true, false, false, snapshot, {}}, snapshot};
+}
+
+Response<std::chrono::system_clock::time_point> Client::getServerStartTime() {
+  google::protobuf::Empty request;
+  google::protobuf::Timestamp response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetStartTime(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetStartTime"), impl_->last_state), {}};
+  }
+  const auto since_epoch =
+      std::chrono::seconds(response.seconds()) + std::chrono::nanoseconds(response.nanos());
+  const auto start_time = std::chrono::system_clock::time_point(
+      std::chrono::duration_cast<std::chrono::system_clock::duration>(since_epoch));
+  return {{true, true, false, false, impl_->last_state, {}}, start_time};
+}
+
+Response<BodyState> Client::getBodyState() {
+  google::protobuf::Empty request;
+  api::v1::CmsState response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetCmsState(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetCmsState"), impl_->last_state), {}};
+  }
+  return {{true, true, false, false, impl_->last_state, {}}, decodeBodyState(response)};
+}
+
+Response<MotorStatus> Client::getMotorStatus() {
+  google::protobuf::Empty request;
+  api::v1::MotorStatusResponse response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetMotorStatus(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetMotorStatus"), impl_->last_state), {}};
+  }
+  return {{true, true, false, false, impl_->last_state, {}}, decodeMotorStatus(response)};
+}
+
+Response<Voltage> Client::getVoltage() {
+  google::protobuf::Empty request;
+  api::v1::Voltage response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetVoltage(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetVoltage"), impl_->last_state), {}};
+  }
+  Voltage voltage;
+  voltage.values_v.assign(response.values().begin(), response.values().end());
+  return {{true, true, false, false, impl_->last_state, {}}, std::move(voltage)};
+}
+
+Response<ProfileInfo> Client::getProfile() {
+  google::protobuf::Empty request;
+  api::v1::ProfileInfo response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->GetProfile(&context, request, &response);
+  if (!status.ok()) {
+    return {withCachedState(rpcFailure(status, "GetProfile"), impl_->last_state), {}};
+  }
+  ProfileInfo profile;
+  profile.current = response.current();
+  profile.available.assign(response.available().begin(), response.available().end());
+  profile.descriptions.assign(response.descriptions().begin(), response.descriptions().end());
+  profile.current_description = response.current_description();
+  return {{true, true, false, false, impl_->last_state, {}}, std::move(profile)};
+}
+
+Response<ProfileInfo> Client::switchProfile(const std::string &name) {
+  if (name.empty()) {
+    Result failure;
+    failure.state = impl_->last_state;
+    failure.state.reason = "empty_profile";
+    failure.error = failure.state.reason;
+    return {failure, {}};
+  }
+  if (!impl_->lease_token.empty()) {
+    Result stopped = stop();
+    if (!stopped.confirmsStop()) return {stopped, {}};
+  }
+  api::v1::ProfileRequest request;
+  request.set_name(name);
+  api::v1::ProfileInfo response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->SwitchProfile(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = withCachedState(rpcFailure(status, "SwitchProfile"), impl_->last_state);
+    impl_->last_state = failure.state;
+    return {failure, {}};
+  }
+  impl_->clearLease();
+  impl_->last_state.connected = true;
+  impl_->last_state.motion_ready = false;
+  impl_->last_state.lease_valid = false;
+  impl_->last_state.initial_zero_acknowledged = false;
+  impl_->last_state.reason = "profile_switch_accepted";
+  ProfileInfo profile;
+  profile.current = response.current();
+  profile.available.assign(response.available().begin(), response.available().end());
+  profile.descriptions.assign(response.descriptions().begin(), response.descriptions().end());
+  profile.current_description = response.current_description();
+  return {{true, true, true, false, impl_->last_state, {}}, std::move(profile)};
+}
+
+Result Client::startTelemetry(TelemetryOptions options) {
+  if (!impl_) {
+    Result failure;
+    failure.state.reason = "client_moved";
+    failure.error = failure.state.reason;
+    return failure;
+  }
+
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  if (!options.imu) {
+    impl_->imu_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->imu_available = false;
+    impl_->imu_sequence = 0;
+  } else if (!impl_->imu_subscription || !impl_->imu_subscription->active()) {
+    impl_->imu_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->imu_available = false;
+      impl_->imu_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->imu_subscription = subscribeImu([state](const ImuSample &sample) {
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        state->latest_imu = sample;
+        state->imu_received_at = std::chrono::steady_clock::now();
+        state->imu_available = true;
+        ++state->imu_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  if (!options.joints) {
+    impl_->joint_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->joint_valid_mask = 0;
+    impl_->joint_sequence = 0;
+  } else if (!impl_->joint_subscription || !impl_->joint_subscription->active()) {
+    impl_->joint_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->joint_valid_mask = 0;
+      impl_->joint_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->joint_subscription = subscribeJoints([state](const JointSample &sample) {
+      const auto received_at = std::chrono::steady_clock::now();
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        for (const JointState &joint : sample.joints) {
+          if (joint.id >= kJointCount) {
+            throw std::runtime_error("joint telemetry id is out of range");
+          }
+          state->latest_joints[joint.id] = joint;
+          state->joint_server_elapsed[joint.id] = sample.server_elapsed;
+          state->joint_received_at[joint.id] = received_at;
+          state->joint_valid_mask |= static_cast<std::uint16_t>(1U << joint.id);
+        }
+        ++state->joint_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  if (!options.body) {
+    impl_->body_subscription.reset();
+    std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+    impl_->body_available = false;
+    impl_->body_sequence = 0;
+  } else if (!impl_->body_subscription || !impl_->body_subscription->active()) {
+    impl_->body_subscription.reset();
+    {
+      std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+      impl_->body_available = false;
+      impl_->body_sequence = 0;
+    }
+    Impl *const state = impl_.get();
+    impl_->body_subscription = subscribeBodyState([state](const BodyState &body) {
+      {
+        std::lock_guard<std::mutex> lock(state->telemetry_mutex);
+        state->latest_body = body;
+        state->body_available = true;
+        ++state->body_sequence;
+      }
+      state->telemetry_changed.notify_all();
+    });
+  }
+
+  std::unique_lock<std::mutex> data_lock(impl_->telemetry_mutex);
+  const bool ready = impl_->telemetry_changed.wait_for(data_lock, impl_->config.timeout, [&] {
+    return (!options.imu || impl_->imu_available) &&
+           (!options.joints || impl_->joint_valid_mask != 0) &&
+           (!options.body || impl_->body_available);
+  });
+  ControlState state = impl_->last_state;
+  if (!ready) {
+    state.motion_ready = false;
+    state.reason = "telemetry_timeout";
+    return {false, false, false, false, state, state.reason};
+  }
+  return {true, true, false, false, state, {}};
+}
+
+void Client::stopTelemetry() noexcept {
+  if (!impl_) {
+    return;
+  }
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  impl_->imu_subscription.reset();
+  impl_->joint_subscription.reset();
+  impl_->body_subscription.reset();
+  std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+  impl_->imu_available = false;
+  impl_->imu_sequence = 0;
+  impl_->joint_valid_mask = 0;
+  impl_->joint_sequence = 0;
+  impl_->body_available = false;
+  impl_->body_sequence = 0;
+}
+
+TelemetrySnapshot Client::telemetry() const {
+  TelemetrySnapshot snapshot;
+  if (!impl_) {
+    return snapshot;
+  }
+  std::lock_guard<std::mutex> lifecycle_lock(impl_->telemetry_lifecycle_mutex);
+  std::lock_guard<std::mutex> data_lock(impl_->telemetry_mutex);
+  snapshot.imu.active = impl_->imu_subscription && impl_->imu_subscription->active();
+  snapshot.imu.available = impl_->imu_available;
+  snapshot.imu.sequence = impl_->imu_sequence;
+  snapshot.imu.value = impl_->latest_imu;
+  if (impl_->imu_available) {
+    const auto age = std::chrono::steady_clock::now() - impl_->imu_received_at;
+    snapshot.imu.age = std::chrono::duration_cast<std::chrono::milliseconds>(age);
+    snapshot.imu.fresh = age <= impl_->config.telemetry_stale_after;
+  }
+  snapshot.joints.active = impl_->joint_subscription && impl_->joint_subscription->active();
+  snapshot.joints.valid_mask = impl_->joint_valid_mask;
+  snapshot.joints.sequence = impl_->joint_sequence;
+  snapshot.joints.joints = impl_->latest_joints;
+  snapshot.joints.server_elapsed = impl_->joint_server_elapsed;
+  const auto now = std::chrono::steady_clock::now();
+  for (std::size_t id = 0; id < kJointCount; ++id) {
+    const std::uint16_t bit = static_cast<std::uint16_t>(1U << id);
+    if ((impl_->joint_valid_mask & bit) != 0 &&
+        now - impl_->joint_received_at[id] <= impl_->config.telemetry_stale_after) {
+      snapshot.joints.fresh_mask |= bit;
+    }
+  }
+  snapshot.body.active = impl_->body_subscription && impl_->body_subscription->active();
+  snapshot.body.available = impl_->body_available;
+  snapshot.body.sequence = impl_->body_sequence;
+  snapshot.body.value = impl_->latest_body;
+  return snapshot;
+}
+
+ImuSnapshot Client::latestImu() const { return telemetry().imu; }
+
+JointSnapshot Client::latestJoints() const { return telemetry().joints; }
+
+BodyStateSnapshot Client::latestBodyState() const { return telemetry().body; }
+
+std::unique_ptr<Subscription> Client::subscribeImu(std::function<void(const ImuSample &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("IMU subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::Imu>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) { return stub.ListenImu(context, request); },
+        decodeImu, "ListenImu");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
+}
+
+std::unique_ptr<Subscription> Client::subscribeJoints(
+    std::function<void(const JointSample &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("joint subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::Joint>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) { return stub.ListenJoint(context, request); },
+        decodeJoint, "ListenJoint");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
+}
+
+std::unique_ptr<Subscription> Client::subscribeBodyState(
+    std::function<void(const BodyState &)> handler) {
+  if (!handler) {
+    throw std::invalid_argument("body-state subscription handler must not be empty");
+  }
+
+  const std::shared_ptr<grpc::Channel> channel = impl_->channel;
+  const ControlState state = impl_->last_state;
+  auto operation = [channel, state,
+                    handler = std::move(handler)](Subscription::Impl &subscription) mutable {
+    return subscription.runStream<api::v1::CmsState>(
+        channel, state, handler,
+        [](api::v1::RobotControl::Stub &stub, grpc::ClientContext *context,
+           const google::protobuf::Empty &request) {
+          return stub.ListenCmsState(context, request);
+        },
+        decodeBodyState, "ListenCmsState");
+  };
+
+  return std::unique_ptr<Subscription>(
+      new Subscription(std::make_unique<Subscription::Impl>(std::move(operation))));
+}
+
+ControlState Client::controlState() const { return impl_ ? impl_->last_state : ControlState{}; }
+
+}  // namespace brainstem

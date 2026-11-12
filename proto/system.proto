@@ -1,0 +1,19 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/system.proto";
+
+service System {
+  rpc Handshake(.doso.v1.Handshake) returns (HandshakeReply);
+  rpc Ping(Empty) returns (.doso.v1.Ping);
+  rpc State(Empty) returns (Snapshot);
+  rpc RobotStatus(Empty) returns (.doso.v1.RobotStatus);
+  rpc Health(Empty) returns (Snapshot);
+  rpc Faults(Empty) returns (FaultReport);
+  rpc WatchFaults(Empty) returns (stream FaultReport);
+  rpc Readiness(Empty) returns (Snapshot);
+  rpc Capabilities(Empty) returns (Snapshot);
+  rpc Session(Empty) returns (Snapshot);
+  rpc ProductStatus(Empty) returns (Snapshot);
+}

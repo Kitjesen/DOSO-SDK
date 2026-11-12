@@ -1,321 +1,75 @@
 # DOSO SDK
 
-The official thin C++17 client SDK created by **DOSO** for external programs
-that control a Brainstem Server. The public headers expose DOSO's stable
-`brainstem::Client` API without leaking gRPC, Protobuf, lease tokens, or
-generated protocol classes.
+DOSO 整机 SDK 使用 **Rust + gRPC/Protobuf**，当前处于开发预览阶段。
+开发者通过一个 `DosoClient` 访问系统、运动、定位、地图、导航、观测和高层任务。
+SDK 面向机器人本地能力，不持有云管理凭据。设备不能管理云端归属、授权或规则；云端禁止远程运动控制，本地 SDK 操控继续通过机端控制权和安全链。
+连接完成协议握手后，通过 `system().info()` 取得固件版本、机器人版本和机器人 ID。健康与就绪状态单独查询。
+
+连接实现位于 [client](src/client/mod.rs)，站坐、速度控制和停止位于 [motion](src/motion/mod.rs)，导航目标与任务控制位于 [navigation](src/navigation/mod.rs)。调用方式见[站起与坐下](docs/usage.md#站起与坐下)、[受控遥操作](docs/usage.md#受控遥操作)，与智身、宇树 Go2 的逐项差距见[连接与操控对照](docs/architecture.md#连接与操控对照)。
+
+客户自己的运控程序通过[外部运控模式](docs/api/motion.md#自定义控制器)持续提交逐关节目标；策略语言、推理框架和部署方式由客户选择。
+
+本地地理位置使用 `localization().location()` 和 `watch_location()`，WGS84 经纬度与 SLAM 地图位姿分别提供。1Hz 订阅保留 GNSS 源时间与可用状态，示例为 `cargo run --example watch_location -- http://<robot>:5052`。[地理位置 API](docs/api/localization.md#地理位置)
 
 ```text
-LingTu or another C++ application
-                |
-                v
-       brainstem::Client
-                |
-                v
-private gRPC/Protobuf implementation
-                |
-                v
-       Brainstem Server
+应用 → Rust SDK → gRPC :5052 → LingTu 领域操作 → 现有机器人服务
 ```
 
-This repository contains the C++ autonomous-motion and robot-telemetry client.
-It intentionally exposes domain types rather than every raw Brainstem RPC.
+## 开始使用
 
-## Supported API
+需要 Rust 1.94+ 和 `protoc`。Rust 主线位于 `rust` 分支：
 
-```cpp
-#include <brainstem/client.hpp>
-
-brainstem::Config config;
-config.target = "192.168.123.18:13145";
-config.client_id = "lingtu-driver@robot";
-config.tls.ca_file = "/etc/brainstem/tls/ca.crt";
-config.tls.certificate_file = "/etc/brainstem/tls/lingtu-driver.crt";
-config.tls.private_key_file = "/etc/brainstem/tls/lingtu-driver.key";
-
-brainstem::Client client(config);
-brainstem::Result ready = client.refresh();
-brainstem::Result moving = client.move({0.2, 0.0, 0.3});
-brainstem::Result stopped = client.stop();
+```text
+git clone --branch rust --single-branch https://github.com/Kitjesen/DOSO-SDK.git
+cd DOSO-SDK
 ```
 
-The public surface deliberately stays small:
+在仓库根目录执行：
 
-- `connect()` checks reachability and reads one control-state snapshot.
-- `refresh()` acquires or renews the explicit control lease. Initial acquisition
-  also sends and confirms a checked zero command.
-- `move()` sends body-frame physical velocity: `x/y` in m/s and yaw in rad/s.
-  It never converts values to `[-1, 1]` or silently clamps them.
-- `stop()` sends a checked zero velocity and releases the lease. Only
-  `result.confirmsStop()` means both operations were confirmed.
-- `standUp()` and `sitDown()` stop and release locomotion first if this client
-  owns the lease, then submit the posture action.
-- `enableMotors()`, `disableMotors()`, `setJointZero()`, and
-  `clearMotorFaults()` expose authenticated hardware maintenance operations.
-- `getServerStartTime()`, `getBodyState()`, `getMotorStatus()`, and
-  `getVoltage()` perform typed request/response reads.
-- `startTelemetry()`, `telemetry()`, and `stopTelemetry()` manage selected
-  background streams and expose one thread-safe latest-value snapshot.
-- `latestImu()`, `latestJoints()`, and `latestBodyState()` copy one selected
-  cache directly; none of these getters perform network I/O.
-- `subscribeBodyState()`, `subscribeImu()`, and `subscribeJoints()` open explicit,
-  cancellable raw streams for callers that need every frame.
-- `controlState()` returns the most recently decoded control state without
-  network I/O.
-
-`move()` enforces the Server's 20 ms minimum checked-command interval. A lost
-ACK is retried once with the same sequence and payload, matching the Server's
-idempotency contract. Preemption, a rejected sequence, or a failed lease renewal
-invalidates local motion readiness.
-
-## Managed telemetry
-
-Select only the streams the application needs. Starting telemetry waits up to
-`Config::timeout` for an initial usable sample from each selected stream. Reading
-`telemetry()` only copies the local cache; it performs no network I/O and can run
-alongside the serialized motion-control loop.
-
-```cpp
-brainstem::TelemetryOptions options;
-options.imu = true;
-options.joints = true;
-options.body = false;
-
-brainstem::Result started = client.startTelemetry(options);
-if (started.ok) {
-  brainstem::ImuSnapshot imu = client.latestImu();
-  if (imu.available && imu.fresh) {
-    const auto angular_velocity = imu.value.angular_velocity_rad_s;
-    const auto linear_acceleration = imu.value.linear_acceleration_m_s2;
-  }
-  brainstem::JointSnapshot joints = client.latestJoints();
-  if (joints.complete() && joints.fresh()) {
-    const brainstem::JointState &front_right_hip = joints.joints[0];
-  }
-}
-
-client.stopTelemetry();
+```text
+cargo build --locked
+cargo run --example read_status -- --help
 ```
 
-`startTelemetry()` explicitly starts the selected long-lived gRPC streams and
-their cache worker threads; it is not required by one-shot query APIs such as
-`getMotorStatus()`. It defaults to IMU, joints, and body state. Calling it again
-applies a new selection: disabled streams are cancelled and inactive selected
-streams are restarted. `active` reports whether the Server stream is still running;
-`available` and the joint `valid_mask` report whether cached data may be read.
-IMU `age`/`fresh` and the joint `fresh_mask` use
-`Config::telemetry_stale_after`, which defaults to 500 ms.
+应用可通过 Cargo 的 Git 依赖引用 `rust` 分支，也可使用本地 path 依赖。安装与常用流程见[快速入门](docs/usage.md)，函数签名、参数、返回值和示例见[API手册](docs/api/README.md)。
 
-The joint cache has 16 stable slots indexed by joint ID. A full Brainstem frame
-populates all slots; later single-joint messages update only their own slot.
-`server_elapsed[id]` preserves the matching Brainstem sample timestamp. Call
-`complete()` before assuming all 16 positions are known.
+导航已提供地图目标提交、任务状态、等待终态、暂停、恢复、取消与路线订阅。可运行的[导航到点示例](examples/navigate.rs)按一次目标关联同一个任务，使用前先查看 `cargo run --example navigate -- --help`。[导航 API](docs/api/navigation.md)说明当前公开能力与验收边界；规划与执行由机器人侧 LingTu 导航服务负责，正式机端服务部署和真实到点闭环仍待验收。
 
-Motor temperature, per-motor voltage, faults, and aggregate voltage are
-request/response data in `brainstem_api` 2.2, not streams. Read them when needed
-with `getMotorStatus()` and `getVoltage()`; they do not require
-`startTelemetry()` or a locomotion lease.
+## 目录
 
-The IMU cache contains body-frame angular velocity in rad/s, a
-`orientation_world_to_body` quaternion in `w/x/y/z` order, and
-session-relative `server_elapsed`. The body frame is right-handed: +X forward,
-+Y left, +Z up. With a 2.2
-Server it also contains body-frame linear acceleration in m/s². The acceleration
-is an `std::optional`: it is empty when connected to a compatible older Server
-that does not send field 4.
-
-## Telemetry reference
-
-The SDK currently returns these public types:
-
-| API | Information |
-| --- | --- |
-| `connect()` / `controlState()` | Connectivity, typed body state, software motor-output gate/fault, motion readiness, lease owner and remaining time, command sequence, accepted/rejected counts. |
-| `getServerStartTime()` | Brainstem process start time as a UTC `system_clock::time_point`; use it to detect a Server restart and invalidate session-relative assumptions. |
-| `getBodyState()` / managed or raw body-state stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
-| `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
-| `getVoltage()` | Voltage values in Brainstem protocol order. |
-| managed or raw IMU stream | Body-frame angular velocity in rad/s, optional linear acceleration in m/s², orientation quaternion, and session-relative timestamp. |
-| managed or raw joint stream | Position, velocity, torque, status, joint ID, and session-relative timestamp; full snapshots and single-joint updates are merged by the managed cache. |
-
-For advanced per-frame processing, each raw subscription owns one worker thread
-and one Server stream. The callback runs on that worker thread. Cancellation and
-completion are explicit:
-
-```cpp
-auto imu = client.subscribeImu([](const brainstem::ImuSample &sample) {
-  // Keep this callback short; hand off the sample to your own queue if needed.
-});
-
-imu->cancel();
-brainstem::Result finished = imu->wait();
+```text
+DOSO-SDK/
+├── src/             Rust 七域实现、连接与错误处理
+├── proto/           整机协议：领域 RPC 与 messages/ 消息格式
+├── examples/        Rust 使用示例
+├── tests/           Rust gRPC 合同测试
+├── scripts/         协议绑定生成工具
+├── docs/            架构、使用说明、计划与验证记录
+├── brainstem/       仍在使用的 C++ 底层客户端
+├── archive/python/  历史 Python HTTP 预览
+├── Cargo.toml       Rust 包入口
+└── CMakeLists.txt   C++ 下游兼容构建入口
 ```
 
-Destroying a subscription also cancels and joins it. Read-only telemetry does
-not acquire the locomotion lease.
+Rust 是当前主线。Brainstem C++ 客户端保留独立的[构建与安装说明](brainstem/README.md)；旧 Python 预览保留为[历史参考](archive/python/README.md)。
 
-## Result model
+## 文档与验证
 
-Every network operation returns `brainstem::Result`:
+- [API手册](docs/api/README.md)
+- [对标后的能力缺口与推进顺序](docs/v1-plan.md#对标后的能力缺口)
+- [架构与职责](docs/architecture.md) · [架构总览图（含云端）](docs/images/doso-sdk-architecture-cloud-20261107.png)
+- [观测能力与数据来源](docs/observations.md)
+- [SDK 消息格式与接入状态](docs/message-catalog.md)
+- [相机图像和远程观看](docs/camera.md)
+- [返回码与状态定义](docs/results.md)
+- [机器人信息与固件发布](docs/release.md)
+- [V1 产品计划](docs/v1-plan.md)
+- [通信选择](docs/transport-selection.md)
+- [gRPC 推进与验证记录](docs/grpc-v1-progress.md)
 
-| Field | Meaning |
-| --- | --- |
-| `ok` | The requested operation completed successfully. |
-| `transport_ok` | The RPC reached the Server and produced an application-level response. |
-| `accepted` | The Server accepted the request; it does not imply a physical posture transition completed. |
-| `stop_confirmed` | Checked zero and lease release were both confirmed. |
-| `state` | Latest unified control state. |
-| `error` | Stable reason details for logging and diagnostics. |
+`cargo test --locked` 运行客户端测试和使用说明中的示例编译检查。
+七域接口已接入本地 gRPC 服务，已提供站起/坐下请求、受控遥操作双向流、50Hz任务运行快照流、类型化定位状态，以及 IMU、关节、相机和点云订阅。姿态链原生构建与本地合同验证已通过，设备动作待现场验收，BMS、足端等真实数据源仍待接入。当前方法与来源边界见使用说明。
 
-Use `confirmsStop()` for safety-sensitive stop decisions rather than checking
-only `ok`.
+gRPC 服务已支持 API key 鉴权和 TLS，客户端支持私有 CA。未配置凭据和证书时采用开发用明文 listener。已有测试证据、仿真与实机边界见推进记录，本库尚未正式发布。
 
-## Control lease and identity
-
-The motion client is serialized: call motion methods from one control loop, or
-serialize them in the application. There is no hidden lease heartbeat. A lease
-is a short-lived exclusive token proving that this client owns the locomotion
-path; it prevents navigation, a test tool, and a remote controller from sending
-competing velocity commands. Call `refresh()` before
-`state.lease_remaining_ms` reaches zero; accepted `move()` calls also renew it.
-The Brainstem 2.2 default is 300 ms. Lease expiry or remote-control preemption
-zeros the Brainstem motion path and makes the client not ready. `stop()` first
-sends a checked zero command and then releases the lease.
-
-`Config::client_id` is required. On hardware it must exactly match the
-authenticated certificate principal configured by the Brainstem Server, using
-the `name@scope` form such as `lingtu-driver@robot`.
-
-Supplying any TLS file requires the CA, client certificate, and private key.
-`tls.server_name` is an optional certificate-name override. An empty TLS
-configuration is rejected unless the caller explicitly sets
-`config.allow_insecure = true`; that opt-in is only for loopback development
-and isolated tests. Production remote motion uses mutual TLS.
-
-## Relationship to Unitree SDK2
-
-| Unitree SDK2 | DOSO SDK |
-| --- | --- |
-| `SportClient::Init()` | construct `Client`, then `connect()` |
-| internal control ownership | `refresh()` manages an explicit lease |
-| `Move(vx, vy, wz)` | `move({vx_mps, vy_mps, yaw_rad_s})` |
-| `StopMove()` | confirmed checked-zero plus lease release |
-| `StandUp()` | `standUp()` |
-| `Sit()` | `sitDown()` |
-| typed state subscriptions | body-state, IMU, and joint subscriptions |
-| SDK error code | `Result` and `ControlState` |
-
-## Build, test, and install
-
-Ubuntu dependencies:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config protobuf-compiler \
-  protobuf-compiler-grpc libprotobuf-dev libgrpc++-dev
-```
-
-CMake accepts either the upstream gRPC package configuration or Debian/Ubuntu's
-`grpc++.pc` pkg-config metadata.
-
-Build a clean checkout:
-
-```bash
-bash scripts/verify.sh
-```
-
-That command configures, builds, runs the SDK tests, installs into a temporary
-prefix, and builds a separate package consumer. For a persistent local install:
-
-```bash
-cmake -S . -B build -DBUILD_TESTING=ON -DBRAINSTEM_BUILD_EXAMPLES=ON
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-cmake --install build --prefix "$PWD/install"
-cmake -S tests/package_consumer -B build/consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/install"
-cmake --build build/consumer --parallel
-./build/consumer/brainstem_client_consumer
-```
-
-Applications consume the installed package with:
-
-```cmake
-find_package(BrainstemClient CONFIG REQUIRED)
-target_link_libraries(my_robot PRIVATE brainstem::client)
-```
-
-The repository vendors the exact `brainstem_api` 2.2 input files used for code
-generation under `protocol/`; consumers do not need the Brainstem monorepo or a
-protocol submodule.
-
-## Motion example
-
-The example does nothing unless target, identity, physical velocity, and a
-positive duration are supplied. It renews the lease while motion is active and
-always requests a confirmed stop at the end.
-
-```bash
-./build/brainstem_motion_example \
-  192.168.123.18:13145 lingtu-driver@robot \
-  0.20 0.00 0.00 1000 \
-  /etc/brainstem/tls/ca.crt \
-  /etc/brainstem/tls/lingtu-driver.crt \
-  /etc/brainstem/tls/lingtu-driver.key
-```
-
-Omit the final three TLS paths only for an explicitly insecure local Server;
-the example then enables the SDK's explicit insecure-development opt-in.
-
-## Telemetry example
-
-The telemetry example opens only read-only streams. It prints changed IMU,
-joint-cache, and body-state snapshots for the requested duration and never
-acquires the locomotion lease:
-
-```bash
-./build/brainstem_telemetry_example \
-  192.168.123.18:13145 observer@robot 5000 \
-  /etc/brainstem/tls/ca.crt \
-  /etc/brainstem/tls/observer.crt \
-  /etc/brainstem/tls/observer.key
-```
-
-## Maintenance example
-
-Maintenance commands change robot hardware state and therefore require an
-authenticated actuator principal. `clear-faults` with no IDs clears all faults
-and the current Server disables the motors; `clear-faults:2,15` targets only the
-listed joints.
-
-```bash
-./build/brainstem_maintenance_example \
-  192.168.123.18:13145 maintenance@robot clear-faults:2,15 \
-  /etc/brainstem/tls/ca.crt \
-  /etc/brainstem/tls/maintenance.crt \
-  /etc/brainstem/tls/maintenance.key
-```
-
-Available commands are `enable`, `disable`, `set-zero`, `clear-faults`,
-`clear-faults:<ids>`, `stand-up`, and `sit-down`. Joint zero remains guarded by
-the Server and succeeds only while the body is grounded.
-
-## Current limits
-
-- Brainstem inference history, robot parameters, and profile management do not
-  yet have public DOSO SDK facades.
-- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.2 and
-  therefore do not come from this SDK.
-- Managed streams do not reconnect silently. If `active` becomes false, call
-  `startTelemetry()` again with the desired selection; cached freshness remains
-  explicit.
-- Gesture and speed-mode RPC names exist in the protocol, but Brainstem Server
-  currently returns `UNIMPLEMENTED`; they are not advertised as SDK features.
-- No recover-stand or damping action because Brainstem Server does not yet
-  define those remote RPCs.
-- `standUp()` and `sitDown()` confirm RPC acceptance, not physical completion.
-- The client destructor performs a best-effort stop and may wait up to the
-  configured RPC timeout when it still owns a lease.
-
-The SDK version is `0.5.0`; its bundled protocol contract is `brainstem_api`
-`2.2.0`.
+推进记录中以 `D:/` 开头的链接是开发机上的历史测试证据，不随本仓库分发；API、协议、示例和构建说明使用仓库内链接。

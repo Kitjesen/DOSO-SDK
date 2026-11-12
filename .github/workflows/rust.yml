@@ -1,0 +1,41 @@
+name: DOSO Rust SDK
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+          components: rustfmt, clippy
+
+      - uses: arduino/setup-protoc@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Rust SDK
+        run: cargo test --workspace --locked
+
+      - name: Test example arguments and measurements
+        run: cargo test --workspace --examples --locked
+
+      - name: Test Android Rust bridge on host
+        run: cargo test --manifest-path android/Cargo.toml --locked
+
+      - name: Verify crate package
+        run: cargo package -p doso-sdk --allow-dirty --locked

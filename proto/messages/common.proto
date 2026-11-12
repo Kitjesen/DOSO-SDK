@@ -1,0 +1,47 @@
+syntax = "proto3";
+package doso.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// captured_at is UTC sample time, not receipt time. source_elapsed is measured on clock_id.
+// Include either only when supplied by the source.
+message SampleTime {
+  google.protobuf.Timestamp captured_at = 1;
+  google.protobuf.Duration source_elapsed = 2;
+  string clock_id = 3;
+}
+
+message Empty {}
+
+// Extensible diagnostics; commands and task results use named fields.
+message Snapshot {
+  google.protobuf.Struct fields = 1;
+}
+
+message Command {
+  string request_id = 1;
+  string client_id = 2;
+}
+
+// Position is in metres and yaw in radians, relative to the enclosing message's frame.
+message Pose {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double yaw = 4;
+}
+
+message Receipt {
+  bool ok = 1;
+  optional bool accepted = 2;
+  string request_id = 3;
+  optional string task_id = 4;
+  optional string operation_id = 5;
+  optional string run_id = 6;
+  string reason = 7;
+  string stage = 8;
+  google.protobuf.Struct details = 9;
+  string reason_code = 10;
+}

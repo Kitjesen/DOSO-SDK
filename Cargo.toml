@@ -1,0 +1,23 @@
+[package]
+name = "doso-sdk"
+version = "0.2.0-alpha.1"
+edition = "2021"
+rust-version = "1.94"
+description = "DOSO robot SDK: explicit requests to the LingTu Gateway"
+readme = "README.md"
+publish = false
+include = ["src/**", "proto/**", "examples/**", "tests/**", "docs/**", "build.rs", "Cargo.toml", "Cargo.lock", "README.md"]
+
+[dependencies]
+getrandom = "0.3"
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tonic = { version = "0.14", features = ["tls-native-roots", "tls-ring"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }

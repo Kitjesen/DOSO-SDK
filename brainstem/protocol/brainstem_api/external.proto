@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package brainstem.api.v1;
+
+// External controller ownership is separate from the builtin Walk lease.
+service RobotExternalControl {
+  rpc Enter(ExternalEnterRequest) returns (ExternalStatus);
+  rpc Enable(ExternalSession) returns (ExternalStatus);
+  rpc Disable(ExternalSession) returns (ExternalStatus);
+  rpc Heartbeat(ExternalSession) returns (ExternalStatus);
+  rpc Control(stream ExternalFrame) returns (stream ExternalStatus);
+  rpc Exit(ExternalSession) returns (ExternalStatus);
+  rpc GetStatus(google.protobuf.Empty) returns (ExternalStatus);
+}
+
+message ExternalEnterRequest {
+  string client_id = 1;
+  // Public session identity, preserved through native arbitration.
+  string request_id = 2;
+}
+
+message ExternalSession {
+  string session_token = 1;
+}
+
+message ExternalJointCommand {
+  double q = 1;   // rad
+  double dq = 2;  // rad/s
+  double kp = 3;
+  double kd = 4;
+  double tau = 5; // N m, feedforward
+}
+
+message ExternalFrame {
+  string session_token = 1;
+  uint64 sequence = 2;
+  // Exactly 16 entries in the existing Matrix4 joint index order.
+  repeated ExternalJointCommand targets = 3;
+  // Capture the original robot-issued input window when producing this frame.
+  uint64 input_window = 4;
+}
+
+message ExternalStatus {
+  // Selection stays external after expiry until an explicit Exit.
+  bool selected = 1;
+  bool active = 2;
+  string session_id = 3;
+  // Returned by Enter only. Kept private by the trusted driver.
+  string session_token = 4;
+  bool motor_output_enabled = 5;
+  uint64 last_sequence = 6;
+  string reason = 7;
+  // Software gate closed and disable call acknowledged, not physical standstill.
+  bool motor_disable_confirmed = 8;
+  string client_id = 9;
+  // Window updates do not renew external ownership. Windows expire after 100 ms.
+  uint64 input_window = 10;
+  uint32 joint_count = 11;
+}

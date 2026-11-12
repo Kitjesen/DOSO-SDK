@@ -1,0 +1,111 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+
+message Ping {
+  string status = 1;
+}
+
+// This handshake observes the service and never acquires control.
+message Handshake {
+  uint32 protocol_version = 1;
+  string client_id = 2;
+  string sdk_version = 3;
+}
+
+message HandshakeReply {
+  uint32 protocol_version = 1;
+  reserved 2 to 7;
+  SystemInfo info = 8;
+}
+
+// Initial handshake information, not a live connection or readiness report.
+message SystemInfo {
+  optional string firmware_version = 1;
+  optional string robot_version = 2;
+  // Permanent cloud devices.id; provision new devices with a UUID v4.
+  optional string robot_id = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNKNOWN = 0;
+  HEALTH_STATUS_OK = 1;
+  HEALTH_STATUS_WARNING = 2;
+  HEALTH_STATUS_ERROR = 3;
+}
+
+// Current local Product state. The session token is required for guarded switching.
+message ProductStatus {
+  optional bool available = 1;
+  string status = 2;
+  optional string product = 3;
+  optional string product_session_id = 4;
+}
+
+// A missing optional field means the source did not provide it.
+message RobotStatus {
+  string mode = 1;
+  optional bool ready = 2;
+  SampleTime time = 3;
+  HealthStatus health = 4;
+  optional bool software_emergency_stop = 5;
+  optional bool hardware_emergency_stop = 6;
+  string reason = 7;
+}
+
+// Distinguishes data readiness, motion readiness and non-motion safety.
+message ReadinessState {
+  string status = 1;
+  optional bool ready = 2;
+  optional bool data_ready = 3;
+  optional bool motion_ready = 4;
+  optional bool non_motion_safe = 5;
+  repeated string reasons = 6;
+  repeated string advisories = 7;
+}
+
+message BatteryState {
+  optional double percent = 1;       // 0–100 percent
+  optional double voltage_v = 2;     // battery voltage, not motor bus voltage
+  optional double temperature_c = 3;
+  optional bool charging = 4;
+  SampleTime time = 5;
+  optional double current_a = 6;     // positive when discharging
+}
+
+enum FaultSeverity {
+  FAULT_SEVERITY_UNKNOWN = 0;
+  FAULT_SEVERITY_WARNING = 1;
+  FAULT_SEVERITY_ERROR = 2;
+  FAULT_SEVERITY_FATAL = 3;
+}
+
+message Fault {
+  string source = 1;
+  string code = 2;
+  FaultSeverity severity = 3;
+  string message = 4;
+  optional bool active = 5;
+  SampleTime time = 6;
+}
+
+// Known active faults from observed sources. No faults does not imply full health coverage.
+message FaultReport {
+  HealthStatus health = 1;
+  repeated Fault faults = 2;
+  repeated string observed_sources = 3;
+  repeated string unavailable_sources = 4;
+}
+
+message ControlState {
+  optional bool available = 1;
+  optional bool held_by_client = 2;
+  string owner = 3;
+  SampleTime time = 4;
+  uint64 owner_epoch = 5;
+  optional bool holding = 6;
+  string reason = 7;
+  optional double received_age_ms = 8;
+  bool fresh = 9;
+}

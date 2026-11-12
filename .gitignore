@@ -7,3 +7,17 @@
 .omc/
 .omx/
 *.user
+__pycache__/
+*.py[cod]
+*.egg-info/
+/dist/
+/.venv/
+/target/
+/.local/
+/.ruff_cache/
+/brainstem/build*/
+/brainstem/install*/
+/archive/python/build/
+/archive/python/dist/
+/archive/python/.pytest_cache/
+/archive/python/.ruff_cache/

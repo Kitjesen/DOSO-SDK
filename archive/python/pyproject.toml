@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doso-sdk"
+version = "0.1.0a1"
+description = "DOSO whole-robot client for the LingTu Gateway"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.9", "build>=1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["doso", "doso.*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+cache_dir = "build/pytest-cache"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src"]
+include = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py"]
+cache-dir = "build/ruff-cache"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

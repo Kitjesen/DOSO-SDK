@@ -1,0 +1,63 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+
+enum ControllerMode {
+  CONTROLLER_MODE_UNKNOWN = 0;
+  CONTROLLER_MODE_BUILTIN = 1;
+  CONTROLLER_MODE_EXTERNAL = 2;
+}
+
+message ControllerState {
+  ControllerMode mode = 1;
+  string session_id = 2;
+  bool active = 3;
+  bool motor_output_enabled = 4;
+  // Last frame validated by the robot. Disabled output stores targets for Enable.
+  uint64 last_sequence = 5;
+  string reason = 6;
+  optional double received_age_ms = 7;
+  bool fresh = 8;
+  bool motor_disable_confirmed = 9;
+  uint32 joint_count = 10;
+}
+
+// Robot joint order. q in rad, dq in rad/s, tau in N*m.
+message JointCommand {
+  double q = 1;
+  double dq = 2;
+  double kp = 3;
+  double kd = 4;
+  double tau = 5;
+}
+
+message JointTargets {
+  repeated JointCommand joints = 1;
+}
+
+message ExternalControlRequest {
+  Command command = 1;
+  uint64 sequence = 2;
+  // Brainstem-issued window captured with the original targets. Never retag queued frames.
+  uint64 input_window = 3;
+  oneof action {
+    Empty enter = 4;
+    Empty enable = 5;
+    Empty heartbeat = 6;
+    JointTargets frame = 7;
+    Empty close = 8;
+    Empty disable = 9;
+  }
+}
+
+message ExternalControlReply {
+  string request_id = 1;
+  uint64 sequence = 2;
+  bool accepted = 3;
+  string reason = 4;
+  // Local native queue admission. ControllerState.last_sequence reports robot validation.
+  bool ingress_accepted = 5;
+  uint64 input_window = 6;
+  ControllerState state = 7;
+}
