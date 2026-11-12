@@ -6,6 +6,9 @@ import public "messages/navigation.proto";
 
 service Navigation {
   rpc Go(Goal) returns (Receipt);
+  rpc GoWithOptions(Goal) returns (Receipt);
+  rpc PreviewPlan(PlanQuery) returns (PlanPreview);
+  rpc SetSpeedLimit(TaskSpeedLimit) returns (Receipt);
   rpc Status(Empty) returns (Snapshot);
   rpc Path(Empty) returns (Snapshot);
   rpc Route(Empty) returns (NavigationPath);

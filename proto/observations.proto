@@ -7,6 +7,7 @@ import public "messages/observations.proto";
 service Observations {
   rpc Scene(Empty) returns (Snapshot);
   rpc CameraStatus(Empty) returns (Snapshot);
+  rpc CameraCalibration(Empty) returns (.doso.v1.CameraCalibration);
   rpc WatchImu(Empty) returns (stream ImuSample);
   rpc WatchJoints(Empty) returns (stream JointSample);
   rpc Motors(Empty) returns (MotorStates);

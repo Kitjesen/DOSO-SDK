@@ -1,6 +1,6 @@
 # 连接与公共接口
 
-`DosoClient` 管理一个共享gRPC通道、初次握手信息及每次请求的元数据。七个领域通过同一个客户端访问。机器人端服务默认使用5052端口。[客户端源码](../../src/client/mod.rs)
+`DosoClient` 管理一个共享gRPC通道、最近成功握手的信息及每次请求的元数据。七个领域通过同一个客户端访问。机器人端服务默认使用5052端口。[客户端源码](../../src/client/mod.rs)
 
 ## Config
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-连接采用观察式握手。当前调用需要已知endpoint，独立控制权申请与连接事件接口列入能力缺口。初次信息包含机器人ID、机器人版本和固件版本，详细语义见system页面。[system](system.md) · [控制权边界](motion.md)
+连接采用观察式握手。当前调用需要已知endpoint；连接本身不申请控制权，控制权通过 `motion().claim_control()` 显式申请。握手信息包含机器人ID、机器人版本和固件版本，详细语义见system页面。[system](system.md) · [控制权边界](motion.md)
 
 ## with_config
 
@@ -79,6 +79,32 @@ pub async fn DosoClient::with_config(config: Config) -> Result<DosoClient>
 | `Internal`，本地`ErrorKind::Protocol` | 收到不匹配的握手版本或缺少SystemInfo |
 
 所有错误码和原始详情通过统一`Error`读取。[返回码](../results.md)
+
+## reconnect
+
+```text
+pub async fn DosoClient::reconnect(&mut self) -> Result<()>
+```
+
+沿用客户端原有地址、TLS、凭据、调用方身份和超时配置，建立新的gRPC通道并重新执行只读握手。成功后替换客户端通道，`system().info()` 返回这次握手的身份快照。连接等待和握手请求分别受 `Config.timeout` 约束。
+
+已有 `robot_id` 时，新握手必须返回相同ID；ID改变或消失返回 `ErrorKind::Protocol`。初次握手没有ID时，允许后续握手获得ID。该检查适用于本方法显式重连时的握手，不代表每次普通RPC都重新验证机器人身份。
+
+连接、鉴权、协议或身份检查失败时返回错误，保留旧通道与上次成功的身份快照；旧快照不代表本次连接成功，也不保证旧通道当前可用。需要改地址或凭据、连接另一台机器人时，使用 `connect/with_config` 创建新的客户端。
+
+```rust,no_run
+use doso_sdk::DosoClient;
+
+async fn reconnect(robot: &mut DosoClient) -> Result<(), Box<dyn std::error::Error>> {
+    robot.reconnect().await?;
+    println!("{:?}", robot.system().info());
+    let mut imu = robot.observations().watch_imu().await?;
+    println!("{:?}", imu.message().await?);
+    Ok(())
+}
+```
+
+重新连接不恢复已有订阅、不重放控制命令、不重新申请控制权。普通 `tonic::Streaming` 仍属于原通道，需要调用方结束旧流并重新订阅；借用客户端的 `Teleop/ExternalControl` 会话需要先结束，才能取得 `&mut DosoClient`。重新申请控制权前应读取当前状态，继续遵守机端仲裁。
 
 ## 领域访问
 
@@ -127,7 +153,7 @@ async fn request_stand(robot: &DosoClient) -> Result<()> {
 
 Rust对象管理客户端和流资源。普通订阅通过丢弃其`tonic::Streaming`结束，遥操作需要确认停止与释放时调用`Teleop::close()`。保留订阅流时，它继续持有自身的连接资源。
 
-再次调用`connect/with_config`可建立新的客户端并重新握手，刷新初次身份快照。应用可通过`ping()`和所需领域的状态方法观察当前服务。独立连接状态事件、控制会话恢复和自动恢复业务订阅仍在待实现清单中。[system.ping](system.md) · [能力缺口](../v1-plan.md#对标后的能力缺口)
+Tonic可为普通RPC重建底层传输连接，但不会替应用重新握手、刷新身份快照或恢复业务流。`reconnect()` 显式建立新通道并核对握手；再次调用 `connect/with_config` 可建立独立客户端。应用可通过 `ping()` 和所需领域的查询观察当前服务。当前不提供独立连接状态事件或自动恢复业务订阅。[system.ping](system.md) · [能力缺口](../v1-plan.md#对标后的能力缺口)
 
 ## Pose::validate
 

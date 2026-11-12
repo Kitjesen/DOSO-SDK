@@ -1,6 +1,6 @@
 # 机器人信息与固件发布
 
-文档核对日期为2026-11-08。SDK 的 `system().info()` 统一提供三项信息，当前云端设备开通和下一阶段见 [robot-cloud推进记录](D:/DOSO/robot-cloud/PROGRESS.md)。核对日期不表示已发布新固件或完成设备登记验收。
+文档核对日期为2026-11-13。SDK 的 `system().info()` 统一提供三项信息，当前云端设备开通和下一阶段见 [robot-cloud推进记录](D:/DOSO/robot-cloud/PROGRESS.md)。核对日期不表示已发布新固件或完成设备登记验收。
 
 | 信息 | SDK 字段 | 含义与来源 |
 | --- | --- | --- |
@@ -8,7 +8,7 @@
 | 机器人版本 | `robot_version` | 型号与硬件代际，沿用 `vendor/model`，读取 RunPlan 或 `LINGTU_ROBOT` |
 | 机器人 ID | `robot_id` | 这台机器的永久 UUID，读取设备环境变量 `DOSO_DEVICE_ID` |
 
-三项均允许缺失，Rust 中表示为 `None`。开发源码运行且没有发布元数据时，固件版本保持缺失。连接取得的是初次握手快照，动态运行环境、会话、健康与就绪分别通过现有状态接口查询。字段定义见 [SystemInfo](../proto/messages/system.proto)。
+三项均允许缺失，Rust 中表示为 `None`。开发源码运行且没有发布元数据时，固件版本保持缺失。连接取得的是最近成功握手快照，动态运行环境、会话、健康与就绪分别通过现有状态接口查询。字段定义见 [SystemInfo](../proto/messages/system.proto)。
 
 ## 永久机器人 ID
 
@@ -30,7 +30,7 @@ LingTu Host与 `doso-cloud-link` 的systemd配置共用同一个 `agent.env`，S
 
 复用现有打包与安装流程，由发布包的 `metadata.json.version` 统一表示交付的软件版本。组件依赖、构建提交和协议兼容信息由现有构建与发布产物记录，使用者管理上述三项即可。发布入口见 [LingTu 发布说明](../../lingtu/scripts/deploy/README.md)。
 
-当前发布包覆盖 LingTu 原生运行时，Brainstem 固件纳入整机统一交付仍待接入。首台设备的独立 ID、实际固件版本与安装验收结果也仍待实机确认。
+当前发布包覆盖 LingTu 原生运行时，Brainstem 固件纳入整机统一交付仍待接入。THUNDER-DEV-001 已登记永久 UUID，并写入设备配置；正式机端 Gateway 尚未部署，SDK 握手三项信息与整机安装验收仍未完成。身份登记不代表客户绑定或开启云连接，详见[功能清单](features.md#部署与交付)。
 
 2026-11-07另有已登记模拟库存、正常API绑定和实际Web App状态流程的验证，库存显式标为模拟，详见 [SIMULATED_FLOW.md](D:/DOSO/robot-cloud/docs/SIMULATED_FLOW.md)。该记录不证明首台真实机器狗身份已开通、三项信息已可信上云，或整机固件发布已完成。
 

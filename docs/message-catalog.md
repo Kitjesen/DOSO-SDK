@@ -12,6 +12,8 @@
 
 已有类型从原文件迁入 `messages/`，不保留重复定义。原 RPC 继续使用相同消息全名和字段编号，目录迁移本身不新增机器人能力。当前服务端和 Rust SDK 使用同一协议包 `doso.v1`，消息组织方式不意味着有七个独立连接或进程。
 
+功能实现和测试状态统一见[功能清单](features.md)，本页维护消息及来源语义。
+
 ## 当前 RPC 已使用的消息
 
 | 领域 | 已有主要消息 | 接收方式 | 已明确的内容与缺口 |
@@ -21,11 +23,13 @@
 | `motion` 外部运控 | `ControllerMode`、`ControllerState`、`JointCommand`、`JointTargets`、`ExternalControlRequest`、`ExternalControlReply` | 控制器查询与双向关节目标流 | 消息在 [controller.proto](../proto/messages/controller.proto) 定义；逐关节目标包含q/dq/kp/kd/tau，队列接纳与机器人帧验证分别报告，调用及关节顺序见[外部运控API](api/motion.md#自定义控制器) |
 | `localization` | `PoseSample`、`Pose`、`Snapshot`、`LocalizationState`、`GeographicLocation`、`GeographicFix`、`GeographicState` | 查询、位姿流与 1Hz 地理位置流 | 地图位姿与 WGS84 经纬度分别表示；GNSS 保留源时间、可用状态和未知精度，无 fix 不带旧坐标；详见[地理位置 API](api/localization.md#地理位置) |
 | `maps` | `MapRecord`、`MapList`、`MapOperation`、`ProductOperation`、`MapContentInfo`、`MapContent`、`MapGrid` | 查询；点云文件为分块流 | 地图列表、保存/切换状态、PCD 读取及保存的二维栅格查询已接 mapd |
-| `navigation` | `Task`、`TaskState`、`Snapshot`、`NavigationPath` | 查询、任务与路线流 | 任务有明确字段；`route()`、`watch_path()` 使用标准 XYZ 路线，旧 `path()` 和导航状态仍是通用结构 |
+| `navigation` | `Task`、`TaskState`、`Snapshot`、`NavigationPath`、`PlanQuery`、`PlanPreview`、`TaskSpeedLimit` | 查询、任务与路线流 | 任务有明确字段；`route()`、`watch_path()` 使用标准 XYZ 路线，旧 `path()` 和导航状态仍是通用结构 |
 | `observations` | `ImuSample`、`JointSample`、`MotorStates`、`MotorVoltagesResponse`、`CameraFrame`、`CameraSample`、`CloudFrame` | IMU、关节、相机和点云为流；电机状态及电压为查询 | 相机 Sample 流包含服务内发布序号；各数据的时间、有效性、索引和编码边界见下表 |
-| `tasks` | `Instruction`、`Run`、`TaskRunState` | 命令回执、运行查询和当前 run 50Hz 快照流 | `get_run_state()` 和 `Run::state()` 共用当前 AgentPlanner 状态解析，`watch_run()` 每 20ms 交付当前 `Run` 快照，允许内容重复 |
+| `tasks` | `Instruction`、`Run`、`TaskRunState`、`InspectionBinding`、`InspectionRoute`、`InspectionTask` | 命令回执、运行查询和当前 run 与巡检任务50Hz快照流 | `get_run_state()` 和 `Run::state()` 共用当前 AgentPlanner 状态解析，`watch_run()` 每 20ms 交付当前 `Run` 快照，允许内容重复 |
 
 `Snapshot.fields` 和各消息的 `details` 使用 `google.protobuf.Struct`。核心业务字段逐项固定前，调用方不能仅凭类型知道全部字段、单位和可选性。
+
+巡检消息单独位于 [messages/inspection.proto](../proto/messages/inspection.proto)，由 tasks.proto 公开导出。路线沿用既有 schema，任务消息区分接纳、执行事实和终态，详见[巡检 API](api/tasks.md#巡检路线与任务)。
 
 ## 本轮新增的标准消息
 
@@ -47,6 +51,7 @@
 | `LocalizationState` | [localization.proto](../proto/messages/localization.proto) | 定位状态、当前地图、就绪、新鲜度与原因 | `localization().state()` 已映射现有定位 owner，未知状态保留 `source_state`，未知时间或布尔值保持缺失 |
 | `MapGrid` | [maps.proto](../proto/messages/maps.proto) | 栅格地图：地图 ID、内容代次、宽高、米制分辨率、原点、坐标系与 cells | `maps().grid()` 已接 mapd 保存产物；cells 自原点按行存储，x 先变化再变化 y，0–100 为占据值，255 表示未知；源无采样时间 |
 | `NavigationPath` | [navigation.proto](../proto/messages/navigation.proto) | 导航路线 | `route()` 和 `watch_path()` 读取地图坐标系缓存；旧兼容路径上游可能将缺少的高度填零，不能一概视作实测高度 |
+| `CameraCalibration` | [observations.proto](../proto/messages/observations.proto) | 源彩色图尺寸、焦距、主点、坐标系及畸变 | `camera_calibration()` 已接已发布的相机内参；缺来源返回 UNAVAILABLE，不能直接视为旋转后 JPEG 的标定 |
 | `CameraInfo` | [observations.proto](../proto/messages/observations.proto) | 相机设备与成像信息 | 编码已知为JPEG；ID、尺寸和坐标系为optional，来源未知时为None |
 | `CameraSample` | [observations.proto](../proto/messages/observations.proto) | 复用 `CameraFrame` 和 `CameraInfo`，附带时间和可选帧序号 | 查询和流已接 JPEG 来源；流序号为服务发布计数，时间和尺寸等未知信息未接入，需设备验收 |
 | `FootContact` | [observations.proto](../proto/messages/observations.proto) | 足端标识、可选接触状态、可选三轴力 N、坐标系和时间 | 仅定义格式，设备支持和真实来源待确认；缺少力传感器时不推算或填造力值 |
@@ -60,12 +65,12 @@
 | 数据 | 格式与单位 | 时间、坐标和有效性 |
 | --- | --- | --- |
 | IMU | `ImuSample`：角速度 rad/s、加速度 m/s²、姿态四元数 | 字段声明姿态为 world→body；四元数字段名为 w/x/y/z。`source_elapsed` 是 Brainstem 服务映射事件时的相对时间，不是硬件采样时间；未提供的消息字段保持缺失，不拼造值 |
-| 关节 | `JointSample.joints`：ID、位置 rad、速度 rad/s、力矩 N·m、状态码 | 一条消息可能是单关节事件，也可能是上游整帧；不能默认所有关节同时采样。`source_elapsed` 与 IMU 同属源服务相对时间；各型号关节 ID、名称、顺序和方向还需明确 |
+| 关节 | `JointSample.joints`：ID、位置 rad、速度 rad/s、力矩 N·m、状态码 | 一条消息可能是单关节事件，也可能是上游整帧；不能默认所有关节同时采样。`source_elapsed` 与 IMU 同属源服务相对时间；Thunder 当前源码的统一索引与原始报告 ID 对照见[关节编号](api/observations.md#doso-thunder-16-轴编号)；旧部署转换和实际方向标定仍待现场确认 |
 | 电机诊断 | `MotorStates`：每电机 ID、online、状态码、温度 °C、原始故障码 | 当前为查询，没有统一报告有效位和采样时间；离线默认值不能证明设备健康 |
 | 电机电压 | `MotorVoltagesResponse.volts`：V | 查询触发底层 CAN 参数读取；0 V 也可能是未响应。它不是电池电量或 BMS 状态；数组索引需要与型号电机映射一致 |
 | 身体状态 | `BodyState`：kind、transition、gesture_name | 先返回当前状态，再接收状态事件；无固定推送频率、无源采样时间；它不表示运动命令已完成或已物理停稳 |
 | 地图位姿 | `PoseSample`：x/y/z 为 m，yaw 为 rad，`frame_id` 为坐标系 | 有可缺省接收年龄与fresh；已知过期/定位丢失会终止流。它不是硬件采样时间，重复推送不代表新采样 |
-| 相机图像 | `CameraFrame.jpeg`：JPEG 文件字节 | `CameraSample` 流含 JPEG 编码和服务发布序号；采样时间、相机 ID、尺寸和坐标系尚无来源，内参仍未定义 |
+| 相机图像 | `CameraFrame.jpeg`：JPEG 文件字节 | `CameraSample` 流含 JPEG 编码和服务发布序号；采样时间、相机 ID 等仍按源缺失表达；CameraCalibration 已接源彩色图内参，JPEG 预览变换不保证与其一致 |
 | 实时点云 | `CloudFrame.pcld`：PCLD v2 二进制帧；Rust `decode()` 生成 `PointCloud` | 解码后有米制 XYZ、可选 RGB、frame_id、epoch、sequence、stamp_s、stream_kind、scale_m；属于显示预览，经过量化和显示采样，不承诺完整原始雷达数据 |
 | 保存地图点云 | `MapContent`：第一条为 ID、可选内容代次/坐标系和字节数，后续为 PCD 块 | 文件流正常结束且总字节数匹配才表示读取完成；读取不等同于激活地图或恢复建图 |
 
@@ -85,9 +90,9 @@
 | 定位 | 当前地图、位姿、定位是否可用、状态与原因 | 查询与位姿流 | LingTu SLAM/定位，位姿流已接缓存，类型化状态已映射，源时间仍待完善 |
 | 地图 | 当前地图、建图状态、保存进度、栅格内容 | 查询、操作状态、内容流 | mapd、SLAM、ProductControl；保存栅格读取已接 mapd，未知区域不等于自由空间 |
 | 导航 | 路线、目标、规划/执行/暂停/恢复/结束状态、原因 | 查询与流/事件 | LingTu navd；路线流、任务暂停/恢复已接现有owner，实际执行仍待实机验收 |
-| 相机 | 画面、设备与帧状态 | 图像流和状态事件 | 现有 JPEG relay；编码和服务序号已接，标识、采样时间、分辨率及内参来源待确认 |
+| 相机 | 画面、设备与帧状态 | 图像流和状态事件 | 现有 JPEG relay；编码和服务序号已接，帧标识/采样时间等仍按源表达缺失；CameraCalibration 单独提供已发布源彩色图标定，预览变换另验 |
 | 点云 | 扫描、地图预览、坐标对齐与场景重置 | 帧流 | 现有显示源已提供 PCLD v2；标准格式需写清预览性质和量化，不重复维护另一套点云事实 |
-| 高层任务 | 当前 run 状态、结果与失败原因 | 查询与 50Hz 快照流 | 已接 AgentPlanner 当前 run，任务类型、阶段、进度及统一巡检/跟随入口仍待 owner 支持 |
+| 高层任务 | 当前 run 状态、结果与失败原因 | 查询与 50Hz 快照流 | 已接 AgentPlanner 当前 run，Agent 统一类型/阶段/进度与跟随仍待补；巡检路线、任务流和报告已单独接已有 owner |
 | 足端接触/足力、光照、外设 | 型号真实支持的数据 | 按设备来源确定 | `FootContact`、`LightSample` 已定义格式，真实来源/设备支持仍待确认且无接收 RPC；外设类型待具体设备确认，不作为每台机器人必有的 V1 能力 |
 
 ## 频率、时间和未知值

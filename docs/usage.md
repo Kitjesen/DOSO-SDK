@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
 这里的 `http://` 指 gRPC 的 HTTP/2 明文端点，传输内容为 Protobuf；不是旧版 REST/JSON 地址。`connect(...).await` 先建立通道，再完成 `System.Handshake`，协议匹配后才返回客户端。握手不获取运动控制权、不提交动作。
 
-`system().info()` 同步借用初次握手的 `SystemInfo`，包含固件版本 `firmware_version`、机器人版本 `robot_version` 和机器人 ID `robot_id`。固件版本取当前运行发布包 `metadata.json.version`，机器人版本取 RunPlan 或 `LINGTU_ROBOT` 中的型号，机器人 ID 读取设备端 `DOSO_DEVICE_ID`。缺失项返回 `None`；非空 ID 不是规范 UUID v4 时，握手返回 `FAILED_PRECONDITION` 和 `invalid_robot_id`。具体来源与统一发布规则见[机器人信息与固件发布](release.md)。
+`system().info()` 同步借用最近成功握手的 `SystemInfo`，包含固件版本 `firmware_version`、机器人版本 `robot_version` 和机器人 ID `robot_id`。固件版本取当前运行发布包 `metadata.json.version`，机器人版本取 RunPlan 或 `LINGTU_ROBOT` 中的型号，机器人 ID 读取设备端 `DOSO_DEVICE_ID`。缺失项返回 `None`；非空 ID 不是规范 UUID v4 时，握手返回 `FAILED_PRECONDITION` 和 `invalid_robot_id`。具体来源与统一发布规则见[机器人信息与固件发布](release.md)。
 
 重新连接会刷新这三项信息。动态运行环境和会话查询 `session()`，健康与就绪查询 `health()` 和 `readiness()`。连接采用观察式握手，既有命令经过原有仲裁，独立的控制权申请/释放 API 仍待接入。
 

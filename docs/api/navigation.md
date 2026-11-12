@@ -8,10 +8,11 @@
 
 | 分组 | 方法 | 用途 |
 | --- | --- | --- |
-| 目标 | [`go_to`](#go_to) | 提交地图坐标目标，取得导航任务身份 |
+| 目标 | [`go_to`](#go_to)、[`go_to_with_options`](#go_to_with_options) | 提交地图坐标目标，可指定速度上限和到达半径 |
+| 规划预览 | [`preview_plan`](#preview_plan) | 只计算 XYZ 路线，不创建导航任务 |
 | 状态 | [`status`](#status)、[`task`](#task) | 读取综合诊断或指定任务 |
 | 订阅与等待 | [`watch`](#watch)、[`wait`](#wait) | 连续观察同一任务，或等待其终态 |
-| 任务控制 | [`pause`](#pause)、[`resume`](#resume)、[`cancel`](#cancel) | 暂停、恢复或取消指定任务 |
+| 任务控制 | [`pause`](#pause)、[`resume`](#resume)、[`cancel`](#cancel)、[`set_speed_limit`](#set_speed_limit) | 暂停、恢复、取消任务或调整速度上限 |
 | 路线 | [`route`](#route)、[`watch_path`](#watch_path)、[`path`](#path) | 读取标准路线、订阅路线快照或读取兼容快照 |
 
 ## 可运行导航流程
@@ -49,7 +50,7 @@ pub async fn go_to(
 | `pose.yaw` | 目标偏航角，单位 rad，须为有限值 |
 | `request_id` | 本次提交的身份，`None` 时由 SDK 生成 ULID，`Some` 时须为非空白字符串 |
 
-前置条件由机器人侧执行方判断，包括运行中的导航能力、活动地图、定位与规划输入、控制权限及安全状态。SDK 在发送前检查位姿数值和请求 ID。当前方法的目标参数为 `Pose`，请求的其余导航策略由机器人侧配置决定。
+前置条件由机器人侧执行方判断，包括运行中的导航能力、活动地图、定位与规划输入、控制权限及安全状态。SDK 在发送前检查位姿数值和请求 ID。`go_to` 使用机器人配置的目标参数；需要逐目标限制时使用 `go_to_with_options`。
 
 `accepted == Some(true)` 表示目标已接纳，此时回执必须提供非空 `task_id`，SDK 会检查这一合同。目标接纳后，继续使用该 `task_id` 查询或等待执行结果。`request_id` 标识一次命令，`task_id` 标识导航任务。
 
@@ -77,6 +78,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## 目标选项、规划预览与限速
+
+### go_to_with_options
+
+```text
+pub async fn go_to_with_options(
+    &self, pose: Pose, options: GoalOptions, request_id: Option<&str>,
+) -> Result<CommandReceipt>
+```
+
+`GoalOptions` 的 `max_speed_mps: Option<f64>` 接受有限的 `(0, 5]` m/s，`acceptance_radius_m: Option<f64>` 接受有限的 `(0, 20]` m。`None` 保留机器人配置。参数通过 gRPC 传给既有导航 owner，SDK 不自行限速或判定到达；接纳、任务身份及终态语义与 `go_to` 一致。
+
+至少指定一个选项时，SDK 使用独立 `Navigation.GoWithOptions` RPC。旧服务未实现该入口时返回 `UNIMPLEMENTED`，SDK 保留请求身份并沿用公共提交错误语义，不降级到 `Go`、不去掉限制重新发送。完全默认的 `GoalOptions` 与 `go_to` 使用既有 `Go` RPC，保留旧服务的普通目标调用兼容。
+
+```rust,no_run
+use doso_sdk::{DosoClient, GoalOptions, Pose};
+
+async fn goal(robot: &DosoClient) -> doso_sdk::Result<()> {
+    let receipt = robot.navigation().go_to_with_options(
+        Pose { x: 3.0, y: 2.0, z: 0.4, yaw: 1.57 },
+        GoalOptions { max_speed_mps: Some(0.8), acceptance_radius_m: Some(0.25) },
+        None,
+    ).await?;
+    println!("{receipt:?}");
+    Ok(())
+}
+```
+
+### preview_plan
+
+```text
+pub async fn preview_plan(
+    &self, pose: Pose, acceptance_radius_m: Option<f64>,
+) -> Result<PlanPreview>
+```
+
+在 `map` 坐标系运行现成的原生 XYZ 规划器，未提交目标、创建任务或改变当前运动任务。半径范围与目标选项相同；规划使用位置，`yaw` 不参与路线预览。
+
+`PlanPreview` 返回 `ok`（规划服务是否成功处理）、`feasible`（是否得到可行路线）、`path`、可选起点/目标点、可选 `distance_m` 和 `plan_ms`、`planner` 与 `reasons`。原生服务不可用时 `ok=false` 并保留原因；`ok=true, feasible=false` 表示规划已执行但未找到可行路线。调用方必须分别检查这两个值。预览结果不能保证随后执行时环境和可行性保持一致。
+
+### set_speed_limit
+
+```text
+pub async fn set_speed_limit(
+    &self, task_id: &str, max_speed_mps: f64, request_id: Option<&str>,
+) -> Result<CommandReceipt>
+```
+
+调整同一导航任务的速度上限。速度须有限且大于零，最终支持范围由原生导航配置决定。请求经过机器人现有控制权限、安全检查与原生任务命令 ACK；接纳回执必须保持相同 `task_id` 与本次 `request_id`。它表示速度限制请求已获接纳，实际速度还受规划、安全及运控约束。不会创建或重新提交导航目标。
 
 ## 查询、订阅与等待
 
@@ -237,6 +288,16 @@ async fn read_route(robot: &DosoClient) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 ```
+
+## 验证记录
+
+| 功能 | 已验证范围 | 尚未验证 |
+| --- | --- | --- |
+| 逐目标速度与到达半径 | 本地真实 gRPC handler 将参数传到注入的既有目标 owner；非法参数在提交前拒绝；独立入口避免旧服务忽略限制 | 真机原生规划器的到达判定与速度作用 |
+| XYZ 规划预览 | 本地真实 gRPC 调用保留三维路径、起点、目标、距离、耗时与不可用原因；不调用运动提交入口 | 真机活动地图下的成路、障碍与高差表现 |
+| 任务速度调整 | 本地真实 gRPC 调用保留 native ACK、请求和任务身份；控制租约拒绝有效；Rust 合同覆盖身份错配 | 真机执行中的限速效果及安全约束 |
+
+2026-11-13，LingTu `tests/gateway/test_grpc_navigation_options.py` 与既有 `tests/gateway/test_grpc_sdk.py` 共 **70 项通过**，其中新导航测试 17 项。测试使用本机 gRPC 服务与注入 owner，没有连接或控制真实机器狗。Rust 客户端合同在 [`tests/grpc/navigation.rs`](../../tests/grpc/navigation.rs) 维护；全库构建与测试结果统一记录在 [`TESTING.md`](../../TESTING.md)。
 
 ## 常见失败
 

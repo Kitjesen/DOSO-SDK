@@ -10,6 +10,7 @@
 | --- | --- |
 | [scene](#scene) | 场景图快照 |
 | [camera_status](#camera_status) | 相机服务诊断 |
+| [camera_calibration](#camera_calibration) | 源彩色图像内参与畸变 |
 | [camera_frame](#camera_frame) | 单次 JPEG 快照 |
 | [watch_camera](#watch_camera) | 持续 JPEG 帧 |
 | [camera_sample](#camera_sample) | 带可用元数据的 JPEG 快照 |
@@ -49,6 +50,21 @@ pub async fn camera_status(&self) -> Result<rpc::Snapshot>
 ```
 
 无额外参数。调用 `Observations.CameraStatus`，读取现有相机健康、装配与帧服务状态，返回诊断 `Snapshot`。该方法使用普通请求超时，失败按公共查询约定返回。
+
+### camera_calibration
+
+```text
+pub async fn camera_calibration(
+    &self,
+    viewer_token: Option<&str>,
+) -> Result<rpc::CameraCalibration>
+```
+
+调用 `Observations.CameraCalibration`，读取已装配相机源最近一次发布的彩色图像标定。沿用媒体查看鉴权与普通查询超时，不打开相机、不申请控制权，也不依赖 JPEG 观看者。真实环境默认 `camera_backend=dds` 的 `DdsCameraModule` 从原生相机 SHM info 帧缓存已发布标定；进程内 Orbbec 模块也通过同一 `get_camera_intrinsics()` 能力提供最近标定，Gateway 从已有模块注册表查询。尚未发布标定、没有这一能力或参数无效时返回 `UNAVAILABLE`；旧服务没有该 RPC 时返回 `UNIMPLEMENTED`。
+
+返回 `width_px`、`height_px`、`fx_px`、`fy_px`、`cx_px`、`cy_px`、`frame_id`、`distortion_model` 和 `distortion`。尺寸与焦距/主点单位为像素，当前畸变模型 `plumb_bob`，系数顺序为 `[k1, k2, p1, p2, k3]`。字段直接来自源的 `CameraIntrinsics`，源安装旋转之后的参数由源负责；不虚构采样时间或设备序列号。
+
+**这份标定对应源彩色图像。** JPEG 预览链还可能施加显示旋转等变换，不能直接把这些内参当成预览 JPEG 的标定。接口忠实发布源缓存；源目前旋转主点和尺寸时仍原样保留畸变系数，旋转后的畸变模型适用性尚未完成几何验收。`CameraSample.info` 继续保留其已有的未知字段语义。当前已测试本地 gRPC 数值、缺源、无效标定、鉴权、旧服务错误和四种直角旋转的像素主点公式；真机原始标定、旋转数值与 JPEG 几何对齐未验收。
 
 ### camera_frame
 
@@ -164,6 +180,31 @@ pub async fn watch_joints(&self) -> Result<tonic::Streaming<rpc::JointSample>>
 | `source_elapsed` | 可缺省的源服务相对时长 |
 
 完整帧当前要求位置、速度、力矩和状态各有 16 项，单关节事件只交付该关节。型号的轴对应关系应按设备确认，跨事件的同步性由源定义。越界 ID、缺少关节数据或不完整源帧返回错误。未配置观测源、上游断连及流内错误按公共约定处理。
+
+#### DOSO Thunder 16 轴编号
+
+当前配套 Brainstem 源码在发布单关节 gRPC 事件前，将原始 CAN 报告编号转换为 `JointsMatrix` 索引；`JointSample.joints[].id`、整帧数组索引、`MotorState.id`、`MotorVoltages.volts` 索引与 External `targets` 索引因而一致。**老部署可能仍发送原始报告编号；SDK 保留上游 ID，不自行猜测转换。** 2026-11-12 的 flowfix10 真机部署尚未验证这项归一化，不能直接用旧部署的观测 ID 寻址 External 目标。
+
+| gRPC ID / 电机诊断索引 / External target 索引 | 关节 | leg | CAN ID | 原始报告 ID |
+| --- | --- | --- | --- | --- |
+| 0 | 右前髋 `frHip` | 0 | 1 | 0 |
+| 1 | 右前大腿 `frThigh` | 0 | 2 | 1 |
+| 2 | 右前小腿 `frCalf` | 0 | 3 | 2 |
+| 3 | 左前髋 `flHip` | 1 | 1 | 4 |
+| 4 | 左前大腿 `flThigh` | 1 | 2 | 5 |
+| 5 | 左前小腿 `flCalf` | 1 | 3 | 6 |
+| 6 | 右后髋 `rrHip` | 2 | 1 | 8 |
+| 7 | 右后大腿 `rrThigh` | 2 | 2 | 9 |
+| 8 | 右后小腿 `rrCalf` | 2 | 3 | 10 |
+| 9 | 左后髋 `rlHip` | 3 | 1 | 12 |
+| 10 | 左后大腿 `rlThigh` | 3 | 2 | 13 |
+| 11 | 左后小腿 `rlCalf` | 3 | 3 | 14 |
+| 12 | 右前足/轮 `frFoot` | 0 | 4 | 3 |
+| 13 | 左前足/轮 `flFoot` | 1 | 4 | 7 |
+| 14 | 右后足/轮 `rrFoot` | 2 | 4 | 11 |
+| 15 | 左后足/轮 `rlFoot` | 3 | 4 | 15 |
+
+来源为 Brainstem `skinny_dog_algebra/lib/src/joints_matrix.dart` 的具名顺序、`thunder/lib/src/real_joint.dart` 的 `_flatIndexToLegCan()` 与 `sendJointCommand()`、`thunder/lib/src/server/proto_convert.dart` 的 `jointReportIdToMatrixIndex()`，以及 `thunder/bin/thunder.dart` 的发布入口。公式：原始 ID 为 `leg * 4 + CAN ID - 1`；矩阵索引在 CAN 1–3 时为 `leg * 3 + CAN ID - 1`，CAN 4 时为 `12 + leg`。这是当前 DOSO Thunder 型号合同，不是所有机器人通用关节清单；正方向、零位、齿比与限位仍以对应机器标定配置为准，不能从编号推导。当前没有跨型号关节描述 RPC。
 
 ```rust,no_run
 use doso_sdk::DosoClient;

@@ -35,6 +35,7 @@ impl Config {
 pub struct DosoClient {
     pub(crate) channel: Channel,
     pub(crate) info: SystemInfo,
+    endpoint: Endpoint,
     client_id: String,
     api_key: Option<MetadataValue<tonic::metadata::Ascii>>,
     pub(crate) timeout: Duration,
@@ -87,15 +88,39 @@ impl DosoClient {
         let mut client = Self {
             channel,
             info: SystemInfo::default(),
+            endpoint,
             client_id: config.client_id,
             api_key,
             timeout: config.timeout,
         };
+        client.info = client.handshake(client.channel.clone()).await?;
+        Ok(client)
+    }
+
+    /// Open a new transport and refresh identity after a successful read-only handshake.
+    /// Existing streams are not restored, commands are not replayed, and control is not reclaimed.
+    /// On failure, the previous channel and last successful identity snapshot are retained.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        let channel = self
+            .endpoint
+            .connect()
+            .await
+            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        let info = self.handshake(channel.clone()).await?;
+        if self.info.robot_id.is_some() && self.info.robot_id != info.robot_id {
+            return Err(Error::protocol("robot identity changed during reconnect"));
+        }
+        self.channel = channel;
+        self.info = info;
+        Ok(())
+    }
+
+    async fn handshake(&self, channel: Channel) -> Result<SystemInfo> {
         let reply = Self::read(
-            rpc::system_client::SystemClient::new(client.channel.clone())
-                .handshake(client.request(rpc::Handshake {
+            rpc::system_client::SystemClient::new(channel)
+                .handshake(self.request(rpc::Handshake {
                     protocol_version: PROTOCOL_VERSION,
-                    client_id: client.client_id.clone(),
+                    client_id: self.client_id.clone(),
                     sdk_version: env!("CARGO_PKG_VERSION").into(),
                 }))
                 .await,
@@ -106,10 +131,9 @@ impl DosoClient {
                 reply.protocol_version
             )));
         }
-        client.info = reply
+        reply
             .info
-            .ok_or_else(|| Error::protocol("handshake response is missing system info"))?;
-        Ok(client)
+            .ok_or_else(|| Error::protocol("handshake response is missing system info"))
     }
     pub fn system(&self) -> System<'_> {
         System(self)

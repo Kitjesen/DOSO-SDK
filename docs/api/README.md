@@ -10,14 +10,14 @@
 
 | API文档 | 开发者可以完成的操作 | RPC定义 | Rust实现 |
 | --- | --- | --- | --- |
-| [连接与公共约定](client.md) | 配置地址与凭据、握手、访问领域、生成请求 ID、结束连接资源 | 握手使用[system.proto](../../proto/system.proto) | [client/](../../src/client/mod.rs) |
+| [连接与公共约定](client.md) | 配置地址与凭据、握手/显式重连、访问领域、请求身份与连接资源 | 握手使用[system.proto](../../proto/system.proto) | [client/](../../src/client/mod.rs) |
 | [system](system.md) | 读取身份、能力、健康、故障、就绪、会话和运行模式 | [system.proto](../../proto/system.proto) | [system/](../../src/system/mod.rs) |
 | [motion](motion.md) | 控制权、电机、Profile、外部运控、站坐、速度控制、停止与恢复 | [motion.proto](../../proto/motion.proto) | [motion/](../../src/motion/mod.rs) |
 | [localization](localization.md) | 读取地图位姿、GNSS 地理位置与定位状态，提交重定位 | [localization.proto](../../proto/localization.proto) | [localization/](../../src/localization/mod.rs) |
 | [maps](maps.md) | 建图、保存、加载地图，查询结果、读取 PCD 和栅格 | [maps.proto](../../proto/maps.proto) | [maps/](../../src/maps/mod.rs) |
-| [navigation](navigation.md) | 提交目标、跟踪任务、暂停、恢复、取消和读取路线 | [navigation.proto](../../proto/navigation.proto) | [navigation/](../../src/navigation/mod.rs) |
-| [observations](observations.md) | 读取 IMU、关节、电机、相机、实时点云及场景 | [observations.proto](../../proto/observations.proto) | [observations/](../../src/observations/mod.rs) |
-| [tasks](tasks.md) | 提交高层指令，查询、订阅和取消当前运行 | [tasks.proto](../../proto/tasks.proto) | [tasks/](../../src/tasks/mod.rs) |
+| [navigation](navigation.md) | 目标参数、只读规划、任务限速/控制与路线 | [navigation.proto](../../proto/navigation.proto) | [navigation/](../../src/navigation/mod.rs) |
+| [observations](observations.md) | IMU、关节、电机、相机/内参、实时点云及场景 | [observations.proto](../../proto/observations.proto) | [observations/](../../src/observations/mod.rs) |
+| [tasks](tasks.md) | 高层指令、当前Run；巡检路线、任务与报告 | [tasks.proto](../../proto/tasks.proto) | [tasks/](../../src/tasks/mod.rs) |
 
 构建、Cargo 接入和运行示例见快速入门。返回码和消息字段使用独立的公共说明，领域页面补充各接口的具体语义。[快速入门](../usage.md) · [返回码与状态](../results.md) · [消息格式](../message-catalog.md)
 
@@ -104,6 +104,6 @@ pub fn Error::details(&self) -> Option<&prost_types::Struct>
 
 实际平均速率、帧间抖动和机器人端验证分别记录。当前定位速度反馈与里程计共用约10Hz的默认源导出，高频缓存流会重复源样本。[验证记录](../grpc-v1-progress.md)
 
-## 当前能力缺口
+## 功能与测试进度
 
-控制权申请与释放、外部运控模式、状态快照、普通运动恢复及已知来源故障已接通。外部控制器由客户自行部署，通过逐关节目标接入；调用顺序及退出语义见[motion](motion.md#自定义控制器)。逐次失权事件、姿态与步态、恢复与阻尼、完整故障来源及BMS、完整任务封装和发布验收继续按实际机器人能力推进。[缺口与推进顺序](../v1-plan.md#对标后的能力缺口)
+每个领域已有功能、实际数据/执行责任方、测试状态和底层阻塞统一维护在[功能与验收清单](../features.md)，复现命令与最近结果见[TESTING.md](../../TESTING.md)。本手册只维护接口使用合同，避免多份进度表互相覆盖。

@@ -3,6 +3,33 @@ use crate::{common::text, rpc, CommandReceipt, DosoClient, Error, Result};
 use super::Navigation;
 
 impl Navigation<'_> {
+    /// Request a new speed cap for the same task through the robot's motion guard.
+    pub async fn set_speed_limit(
+        &self,
+        task_id: &str,
+        max_speed_mps: f64,
+        request_id: Option<&str>,
+    ) -> Result<CommandReceipt> {
+        text(task_id, "task_id")?;
+        super::goal::positive(max_speed_mps, "max_speed_mps", None)?;
+        let command = self.0.command(request_id)?;
+        if command.request_id == task_id {
+            return Err(Error::invalid("request_id must differ from task_id"));
+        }
+        let id = command.request_id.clone();
+        let receipt = DosoClient::receipt(
+            rpc::navigation_client::NavigationClient::new(self.0.channel.clone())
+                .set_speed_limit(self.0.request(rpc::TaskSpeedLimit {
+                    command: Some(command),
+                    task_id: task_id.into(),
+                    max_speed_mps,
+                }))
+                .await,
+            &id,
+        )?;
+        check_receipt(receipt, task_id, &id)
+    }
+
     /// Request a pause for this task. Observe its state to confirm the pause.
     pub async fn pause(
         &self,

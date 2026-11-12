@@ -1,0 +1,84 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import "google/protobuf/struct.proto";
+
+message InspectionRouteQuery {
+  string map_id = 1;
+  string route_id = 2; // Empty only when listing routes.
+}
+
+message InspectionRoute {
+  string map_id = 1;
+  string route_id = 2;
+  uint64 revision = 3;
+  google.protobuf.Struct details = 4; // Existing lingtu.inspection.v1 route schema.
+  string request_id = 5; // Set for put responses; reads have no command identity.
+}
+
+message InspectionRoutes {
+  string map_id = 1;
+  repeated InspectionRoute routes = 2;
+}
+
+message PutInspectionRoute {
+  Command command = 1;
+  google.protobuf.Struct route = 2;
+}
+
+message DeleteInspectionRoute {
+  Command command = 1;
+  string map_id = 2;
+  string route_id = 3;
+}
+
+message InspectionBinding {
+  string product_session_id = 1;
+  string env = 2; // real or sim; empty leaves environment validation to the session.
+}
+
+message StartInspection {
+  Command command = 1;
+  string route_id = 2;
+  string map_id = 3;
+  uint64 revision = 4; // Zero selects the currently stored revision.
+  InspectionBinding binding = 5;
+}
+
+message InspectionTaskQuery {
+  string task_id = 1;
+}
+
+message InspectionTaskListQuery {
+  optional string map_id = 1;
+  optional string route_id = 2;
+  bool include_terminal = 3;
+  optional uint32 limit = 4; // Absent uses 20; the owner clamps to its retention capacity.
+}
+
+message InspectionTasks {
+  repeated InspectionTask tasks = 1;
+  string retention = 2; // Retention name reported by the projection owner.
+  uint32 count = 3;
+  double observed_at_unix_s = 4;
+}
+
+message InspectionControl {
+  Command command = 1;
+  string task_id = 2;
+  string reason = 3;
+  InspectionBinding binding = 4;
+}
+
+message InspectionTask {
+  string task_id = 1;
+  bool found = 2;
+  string current_state = 3; // Owner state: PLANNING/EXECUTING/PAUSED/RECOVERING/SUCCESS/FAILED/CANCELLED.
+  bool state_available = 4;
+  string phase = 5;
+  bool terminal = 6;
+  bool execution_confirmed = 7;
+  string reason = 8;
+  google.protobuf.Struct details = 9; // Existing task timeline and immutable route identity.
+}

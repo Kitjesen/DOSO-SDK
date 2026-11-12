@@ -7,6 +7,8 @@ SDK 面向机器人本地能力，不持有云管理凭据。设备不能管理�
 
 连接实现位于 [client](src/client/mod.rs)，站坐、速度控制和停止位于 [motion](src/motion/mod.rs)，导航目标与任务控制位于 [navigation](src/navigation/mod.rs)。调用方式见[站起与坐下](docs/usage.md#站起与坐下)、[受控遥操作](docs/usage.md#受控遥操作)，与智身、宇树 Go2 的逐项差距见[连接与操控对照](docs/architecture.md#连接与操控对照)。
 
+巡检路线 CRUD、任务执行/查询/订阅/控制与报告复用现有机器人任务 owner，接口见[tasks](docs/api/tasks.md#巡检路线与任务)。
+
 客户自己的运控程序通过[外部运控模式](docs/api/motion.md#自定义控制器)持续提交逐关节目标；策略语言、推理框架和部署方式由客户选择。
 
 本地地理位置使用 `localization().location()` 和 `watch_location()`，WGS84 经纬度与 SLAM 地图位姿分别提供。1Hz 订阅保留 GNSS 源时间与可用状态，示例为 `cargo run --example watch_location -- http://<robot>:5052`。[地理位置 API](docs/api/localization.md#地理位置)
@@ -33,7 +35,7 @@ cargo run --example read_status -- --help
 
 应用可通过 Cargo 的 Git 依赖引用 `rust` 分支，也可使用本地 path 依赖。安装与常用流程见[快速入门](docs/usage.md)，函数签名、参数、返回值和示例见[API手册](docs/api/README.md)。
 
-导航已提供地图目标提交、任务状态、等待终态、暂停、恢复、取消与路线订阅。可运行的[导航到点示例](examples/navigate.rs)按一次目标关联同一个任务，使用前先查看 `cargo run --example navigate -- --help`。[导航 API](docs/api/navigation.md)说明当前公开能力与验收边界；规划与执行由机器人侧 LingTu 导航服务负责，正式机端服务部署和真实到点闭环仍待验收。
+导航提供地图目标及可选限速/到达半径、只读规划预览、运行中限速、任务状态/等待/控制与路线订阅。可运行的[导航到点示例](examples/navigate.rs)按一次目标关联同一个任务，使用前先查看 `cargo run --example navigate -- --help`。[导航 API](docs/api/navigation.md)说明当前公开能力与验收边界；规划与执行由机器人侧 LingTu 导航服务负责，正式机端服务部署和真实到点闭环仍待验收。
 
 ## 目录
 
@@ -55,6 +57,7 @@ Rust 是当前主线。Brainstem C++ 客户端保留独立的[构建与安装说
 
 ## 文档与验证
 
+- [逐板块功能与验收清单](docs/features.md) · [测试记录与复现命令](TESTING.md)
 - [API手册](docs/api/README.md)
 - [对标后的能力缺口与推进顺序](docs/v1-plan.md#对标后的能力缺口)
 - [架构与职责](docs/architecture.md) · [架构总览图（含云端）](docs/images/doso-sdk-architecture-cloud-20261107.png)

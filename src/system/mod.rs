@@ -5,7 +5,7 @@ mod readiness;
 mod status;
 pub struct System<'a>(pub(crate) &'a DosoClient);
 impl<'a> System<'a> {
-    /// Identity returned by the initial handshake. Live state uses the query methods.
+    /// Identity from the last successful handshake. Live state uses the query methods.
     pub fn info(&self) -> &'a rpc::SystemInfo {
         &self.0.info
     }

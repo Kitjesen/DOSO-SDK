@@ -4,6 +4,20 @@ use tonic::{metadata::MetadataValue, Request};
 use super::Observations;
 
 impl Observations<'_> {
+    /// Read source color-image calibration, before JPEG preview transformations.
+    pub async fn camera_calibration(
+        &self,
+        viewer_token: Option<&str>,
+    ) -> Result<rpc::CameraCalibration> {
+        let mut request = self.camera_request(viewer_token)?;
+        request.set_timeout(self.0.timeout);
+        DosoClient::read(
+            rpc::observations_client::ObservationsClient::new(self.0.channel.clone())
+                .camera_calibration(request)
+                .await,
+        )
+    }
+
     pub async fn camera_status(&self) -> Result<rpc::Snapshot> {
         DosoClient::read(
             rpc::observations_client::ObservationsClient::new(self.0.channel.clone())

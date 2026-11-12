@@ -3,19 +3,39 @@ use crate::{
 };
 use std::time::Duration;
 mod control;
+mod goal;
+pub use goal::GoalOptions;
 pub struct Navigation<'a>(pub(crate) &'a DosoClient);
 impl Navigation<'_> {
     pub async fn go_to(&self, pose: Pose, request_id: Option<&str>) -> Result<CommandReceipt> {
+        self.go_to_with_options(pose, GoalOptions::default(), request_id)
+            .await
+    }
+    /// Submit one target with per-task limits; omitted limits use the robot configuration.
+    pub async fn go_to_with_options(
+        &self,
+        pose: Pose,
+        options: GoalOptions,
+        request_id: Option<&str>,
+    ) -> Result<CommandReceipt> {
         pose.validate()?;
+        options.validate()?;
         let command = self.0.command(request_id)?;
         let id = command.request_id.clone();
+        let has_options = options.max_speed_mps.is_some() || options.acceptance_radius_m.is_some();
+        let request = self.0.request(rpc::Goal {
+            command: Some(command),
+            pose: Some(pose),
+            max_speed_mps: options.max_speed_mps,
+            acceptance_radius_m: options.acceptance_radius_m,
+        });
+        let mut client = rpc::navigation_client::NavigationClient::new(self.0.channel.clone());
         let receipt = DosoClient::receipt(
-            rpc::navigation_client::NavigationClient::new(self.0.channel.clone())
-                .go(self.0.request(rpc::Goal {
-                    command: Some(command),
-                    pose: Some(pose),
-                }))
-                .await,
+            if has_options {
+                client.go_with_options(request).await
+            } else {
+                client.go(request).await
+            },
             &id,
         )?;
         if receipt.accepted == Some(true) && receipt.task_id.as_deref().is_none_or(str::is_empty) {

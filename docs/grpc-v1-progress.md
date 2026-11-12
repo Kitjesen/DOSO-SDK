@@ -1,5 +1,13 @@
 # Rust gRPC V1 推进记录
 
+## 功能补齐与统一验收清单（2026-11-13）
+
+新增显式 `reconnect()`、目标速度/到达半径、只读规划预览、运行中任务限速、源相机标定，以及已有巡检路线/任务/报告的 Rust gRPC 接入。导航带限制的目标使用独立 `GoWithOptions`，旧服务明确拒绝，避免忽略限制后执行。相机覆盖默认 DDS/SHM 与进程内 Orbbec 路径；关节文档给出 Thunder 16 轴统一索引与原始报告 ID 对照。
+
+巡检复用原有地图、Product 会话、原生任务、journal 与录制回滚，不另建执行器。HTTP 与 gRPC 共用同一组业务操作；请求接纳、执行事实和终态保持区分。已有本地测试覆盖和历史现场读取保留各自边界。
+
+逐领域已有能力、源责任方、未完成底层能力和现场验收统一见[功能清单](features.md)；本次最终测试数、失败修正、命令与未执行项统一见[TESTING.md](../TESTING.md)。下文各日期的旧结果保留为历史，不用新测试覆盖旧故障。本轮没有部署、重启或发送机器人动作；完整机端 SDK、15 分钟长稳和物理动作仍未验收。
+
 ## Rust 分支与导航运行入口（2026-11-12）
 
 Rust 客户端、七域协议、示例、API 文档、Android Rust 桥接与 CI 由 `rust` 分支维护。[GitHub Rust 主线](https://github.com/Kitjesen/DOSO-SDK/tree/rust)。旧 C++ 客户端保留在 `brainstem/`，历史 HTTP 预览保留在 `archive/python/`；下文“Rust 未提交、未上传”描述本次入库前的检查快照。

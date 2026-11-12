@@ -1,16 +1,24 @@
 use doso_sdk::{
     rpc, Code, Config, DosoClient, ErrorKind, MapState, Pose, ProductState, TaskState, Terminal,
 };
+#[path = "grpc/client.rs"]
+mod client;
 #[path = "grpc/control.rs"]
 mod control;
 #[path = "grpc/external.rs"]
 mod external;
+#[path = "grpc/inspection.rs"]
+mod inspection;
 #[path = "grpc/kinematics.rs"]
 mod kinematics;
 #[path = "grpc/location.rs"]
 mod location;
 #[path = "grpc/motors.rs"]
 mod motors;
+#[path = "grpc/navigation.rs"]
+mod navigation;
+#[path = "grpc/observation_metadata.rs"]
+mod observation_metadata;
 #[path = "grpc/posture.rs"]
 mod posture;
 #[path = "grpc/product.rs"]
@@ -165,9 +173,23 @@ impl rpc::system_server::System for Service {
         Ok(Response::new(rpc::HandshakeReply {
             protocol_version: if mode == 17 { 1 } else { 2 },
             info: (mode != 23).then(|| rpc::SystemInfo {
-                firmware_version: (mode != 22).then(|| "test-firmware".into()),
+                firmware_version: (mode != 22).then(|| {
+                    if mode == 120 {
+                        "updated-firmware"
+                    } else {
+                        "test-firmware"
+                    }
+                    .into()
+                }),
                 robot_version: (mode != 22).then(|| "vendor/model".into()),
-                robot_id: (mode != 22).then(|| "8f7e1c62-0a4d-4b89-96e2-6c47b03db1a5".into()),
+                robot_id: (mode != 22).then(|| {
+                    if mode == 121 {
+                        "2a0b75dc-a0d5-4dd5-a482-7f58fba4ab03"
+                    } else {
+                        "8f7e1c62-0a4d-4b89-96e2-6c47b03db1a5"
+                    }
+                    .into()
+                }),
             }),
         }))
     }
@@ -384,6 +406,17 @@ impl rpc::localization_server::Localization for Service {
 
 #[tonic::async_trait]
 impl rpc::navigation_server::Navigation for Service {
+    async fn go_with_options(
+        &self,
+        request: Request<rpc::Goal>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        if self.mode.load(Ordering::Relaxed) == 152 {
+            return Err(Status::unimplemented(
+                "goal options are not implemented by this server",
+            ));
+        }
+        self.go(request).await
+    }
     async fn go(&self, request: Request<rpc::Goal>) -> Result<Response<rpc::Receipt>, Status> {
         assert_eq!(
             request.metadata().get("x-api-key").unwrap(),
@@ -392,7 +425,54 @@ impl rpc::navigation_server::Navigation for Service {
         let goal = request.into_inner();
         let pose = goal.pose.unwrap();
         assert_eq!((pose.x, pose.y, pose.z, pose.yaw), (1.0, 2.0, 3.0, 0.5));
+        if self.mode.load(Ordering::Relaxed) == 150 {
+            assert_eq!(goal.max_speed_mps, Some(0.8));
+            assert_eq!(goal.acceptance_radius_m, Some(0.25));
+        }
         self.receipt(goal.command.unwrap())
+    }
+    async fn preview_plan(
+        &self,
+        request: Request<rpc::PlanQuery>,
+    ) -> Result<Response<rpc::PlanPreview>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        let request = request.into_inner();
+        assert_eq!(request.acceptance_radius_m, Some(0.25));
+        let pose = request.pose.unwrap();
+        assert_eq!((pose.x, pose.y, pose.z), (1.0, 2.0, 3.0));
+        Ok(Response::new(rpc::PlanPreview {
+            ok: true,
+            feasible: true,
+            path: Some(rpc::NavigationPath {
+                frame_id: "map".into(),
+                points: vec![rpc::Vector3 {
+                    x: pose.x,
+                    y: pose.y,
+                    z: pose.z,
+                }],
+                time: None,
+            }),
+            distance_m: Some(0.0),
+            plan_ms: Some(2.5),
+            planner: "native_global".into(),
+            ..Default::default()
+        }))
+    }
+    async fn set_speed_limit(
+        &self,
+        request: Request<rpc::TaskSpeedLimit>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        let request = request.into_inner();
+        assert_eq!(request.task_id, "task-1");
+        assert_eq!(request.max_speed_mps, 0.7);
+        let mut response = self.receipt(request.command.unwrap())?;
+        if self.mode.load(Ordering::Relaxed) == 151 {
+            response.get_mut().task_id = Some("other-task".into());
+        }
+        Ok(response)
     }
     async fn status(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Snapshot>, Status> {
         Ok(Response::new(rpc::Snapshot::default()))
@@ -948,6 +1028,42 @@ impl rpc::motion_server::Motion for Service {
 
 #[tonic::async_trait]
 impl rpc::observations_server::Observations for Service {
+    async fn camera_calibration(
+        &self,
+        request: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::CameraCalibration>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        assert_eq!(
+            request.metadata().get("authorization").unwrap(),
+            "Bearer viewer"
+        );
+        assert!(request.metadata().get("grpc-timeout").is_some());
+        match self.mode.load(Ordering::Relaxed) {
+            140 => {
+                return Err(Status::unavailable(
+                    "Source camera calibration is unavailable",
+                ))
+            }
+            141 => return Err(Status::unimplemented("old server")),
+            142 => return Err(Status::permission_denied("media_authorization_denied")),
+            _ => {}
+        }
+        Ok(Response::new(rpc::CameraCalibration {
+            width_px: 640,
+            height_px: 480,
+            fx_px: 410.0,
+            fy_px: 411.0,
+            cx_px: 319.5,
+            cy_px: 239.5,
+            frame_id: "source_color".into(),
+            distortion_model: "plumb_bob".into(),
+            distortion: vec![0.1, 0.2, 0.003, 0.004, 0.5],
+        }))
+    }
+
     type WatchPointCloudStream =
         Pin<Box<dyn Stream<Item = Result<rpc::CloudFrame, Status>> + Send>>;
 
@@ -1379,6 +1495,153 @@ impl rpc::maps_server::Maps for Service {
 #[tonic::async_trait]
 impl rpc::tasks_server::Tasks for Service {
     type WatchStream = Pin<Box<dyn Stream<Item = Result<rpc::Run, Status>> + Send>>;
+
+    async fn inspection_routes(
+        &self,
+        request: Request<rpc::InspectionRouteQuery>,
+    ) -> Result<Response<rpc::InspectionRoutes>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(rpc::InspectionRoutes {
+            map_id: request.map_id.clone(),
+            routes: vec![inspection::route(self, &request.map_id, "route-1")],
+        }))
+    }
+
+    async fn inspection_route(
+        &self,
+        request: Request<rpc::InspectionRouteQuery>,
+    ) -> Result<Response<rpc::InspectionRoute>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(inspection::route(
+            self,
+            &request.map_id,
+            &request.route_id,
+        )))
+    }
+
+    async fn put_inspection_route(
+        &self,
+        request: Request<rpc::PutInspectionRoute>,
+    ) -> Result<Response<rpc::InspectionRoute>, Status> {
+        let request = request.into_inner();
+        assert!(request.route.is_some());
+        let mut route = inspection::route(self, "map-1", "route-1");
+        route.request_id = self
+            .receipt(request.command.unwrap())?
+            .into_inner()
+            .request_id;
+        Ok(Response::new(route))
+    }
+
+    async fn delete_inspection_route(
+        &self,
+        request: Request<rpc::DeleteInspectionRoute>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        let request = request.into_inner();
+        assert_eq!(request.map_id, "map-1");
+        assert_eq!(request.route_id, "route-1");
+        self.receipt(request.command.unwrap())
+    }
+
+    async fn start_inspection(
+        &self,
+        request: Request<rpc::StartInspection>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        let request = request.into_inner();
+        assert_eq!(
+            (
+                request.map_id.as_str(),
+                request.route_id.as_str(),
+                request.revision
+            ),
+            ("map-1", "route-1", 7)
+        );
+        assert_eq!(request.binding.unwrap().product_session_id, "session-1");
+        if self.mode.load(Ordering::Relaxed) == 163 {
+            return Err(Status::unavailable("inspection owner unavailable"));
+        }
+        let mut reply = self.receipt(request.command.unwrap())?;
+        if self.mode.load(Ordering::Relaxed) == 162 {
+            reply.get_mut().task_id = None;
+        }
+        Ok(reply)
+    }
+
+    async fn inspection_task(
+        &self,
+        request: Request<rpc::InspectionTaskQuery>,
+    ) -> Result<Response<rpc::InspectionTask>, Status> {
+        Ok(Response::new(inspection::task(
+            self,
+            &request.into_inner().task_id,
+            false,
+        )))
+    }
+
+    async fn inspection_tasks(
+        &self,
+        request: Request<rpc::InspectionTaskListQuery>,
+    ) -> Result<Response<rpc::InspectionTasks>, Status> {
+        let request = request.into_inner();
+        assert_eq!(request.map_id.as_deref(), Some("map-1"));
+        assert_eq!(request.route_id.as_deref(), Some("route-1"));
+        assert_eq!(request.limit, None);
+        let mut tasks = vec![inspection::task(self, "task-1", false)];
+        if request.include_terminal {
+            tasks.push(inspection::task(self, "task-2", true));
+        }
+        Ok(Response::new(rpc::InspectionTasks {
+            count: tasks.len() as u32,
+            tasks,
+            retention: "process_local_gateway_projection".into(),
+            observed_at_unix_s: 1234.0,
+        }))
+    }
+
+    type WatchInspectionStream =
+        Pin<Box<dyn Stream<Item = Result<rpc::InspectionTask, Status>> + Send>>;
+
+    async fn watch_inspection(
+        &self,
+        request: Request<rpc::InspectionTaskQuery>,
+    ) -> Result<Response<Self::WatchInspectionStream>, Status> {
+        assert!(request.metadata().get("grpc-timeout").is_none());
+        let task_id = request.into_inner().task_id;
+        Ok(Response::new(Box::pin(tokio_stream::iter([
+            Ok(inspection::task(self, &task_id, false)),
+            Ok(inspection::task(self, &task_id, true)),
+        ]))))
+    }
+
+    async fn pause_inspection(
+        &self,
+        request: Request<rpc::InspectionControl>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        inspection::control(self, request.into_inner())
+    }
+
+    async fn resume_inspection(
+        &self,
+        request: Request<rpc::InspectionControl>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        inspection::control(self, request.into_inner())
+    }
+
+    async fn cancel_inspection(
+        &self,
+        request: Request<rpc::InspectionControl>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        inspection::control(self, request.into_inner())
+    }
+
+    async fn inspection_report(
+        &self,
+        request: Request<rpc::InspectionTaskQuery>,
+    ) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot {
+            fields: Some(evidence(&request.into_inner().task_id)),
+        }))
+    }
 
     async fn watch(
         &self,

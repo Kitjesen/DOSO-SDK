@@ -84,6 +84,21 @@ message CameraInfo {
   optional string frame_id = 5;
 }
 
+// Calibration of the source color image after source mounting rotation.
+// JPEG preview may apply a separate display transformation.
+message CameraCalibration {
+  uint32 width_px = 1;
+  uint32 height_px = 2;
+  double fx_px = 3;
+  double fy_px = 4;
+  double cx_px = 5;
+  double cy_px = 6;
+  string frame_id = 7;
+  string distortion_model = 8;
+  // Brown-Conrady order: k1, k2, p1, p2, k3.
+  repeated double distortion = 9;
+}
+
 message CameraSample {
   CameraFrame frame = 1;
   CameraInfo info = 2;

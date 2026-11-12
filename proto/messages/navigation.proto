@@ -8,6 +8,31 @@ import "google/protobuf/struct.proto";
 message Goal {
   Command command = 1;
   Pose pose = 2;
+  optional double max_speed_mps = 3;
+  optional double acceptance_radius_m = 4;
+}
+
+message PlanQuery {
+  Pose pose = 1;
+  optional double acceptance_radius_m = 2;
+}
+
+message PlanPreview {
+  bool ok = 1;
+  bool feasible = 2;
+  NavigationPath path = 3;
+  Vector3 start = 4;
+  Vector3 goal = 5;
+  optional double distance_m = 6;
+  optional double plan_ms = 7;
+  string planner = 8;
+  repeated string reasons = 9;
+}
+
+message TaskSpeedLimit {
+  Command command = 1;
+  string task_id = 2;
+  double max_speed_mps = 3;
 }
 
 message TaskQuery {

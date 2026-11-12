@@ -1,4 +1,5 @@
 use crate::{common::text, rpc, CommandReceipt, DosoClient, Error, Result};
+mod inspection;
 mod state;
 mod watch;
 pub struct Tasks<'a>(pub(crate) &'a DosoClient);

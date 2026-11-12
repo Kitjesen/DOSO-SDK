@@ -3,10 +3,23 @@ package doso.v1;
 
 import "common.proto";
 import public "messages/tasks.proto";
+import public "messages/inspection.proto";
 
 service Tasks {
   rpc Send(Instruction) returns (Receipt);
   rpc Get(RunQuery) returns (Run);
   rpc Watch(RunQuery) returns (stream Run);
   rpc Cancel(CancelRun) returns (Receipt);
+  rpc InspectionRoutes(InspectionRouteQuery) returns (.doso.v1.InspectionRoutes);
+  rpc InspectionRoute(InspectionRouteQuery) returns (.doso.v1.InspectionRoute);
+  rpc PutInspectionRoute(.doso.v1.PutInspectionRoute) returns (.doso.v1.InspectionRoute);
+  rpc DeleteInspectionRoute(.doso.v1.DeleteInspectionRoute) returns (Receipt);
+  rpc StartInspection(.doso.v1.StartInspection) returns (Receipt);
+  rpc InspectionTask(InspectionTaskQuery) returns (.doso.v1.InspectionTask);
+  rpc InspectionTasks(InspectionTaskListQuery) returns (.doso.v1.InspectionTasks);
+  rpc WatchInspection(InspectionTaskQuery) returns (stream .doso.v1.InspectionTask);
+  rpc PauseInspection(InspectionControl) returns (Receipt);
+  rpc ResumeInspection(InspectionControl) returns (Receipt);
+  rpc CancelInspection(InspectionControl) returns (Receipt);
+  rpc InspectionReport(InspectionTaskQuery) returns (Snapshot);
 }

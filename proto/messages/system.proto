@@ -20,7 +20,7 @@ message HandshakeReply {
   SystemInfo info = 8;
 }
 
-// Initial handshake information, not a live connection or readiness report.
+// Last successful handshake information, not a live connection or readiness report.
 message SystemInfo {
   optional string firmware_version = 1;
   optional string robot_version = 2;

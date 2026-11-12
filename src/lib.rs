@@ -21,19 +21,20 @@ pub use error::{Error, ErrorKind, Result, Terminal};
 pub use localization::Localization;
 pub use maps::Maps;
 pub use motion::{ExternalControl, Motion, Teleop};
-pub use navigation::Navigation;
+pub use navigation::{GoalOptions, Navigation};
 pub use observations::{CloudStreamKind, Observations, PointCloud};
 pub use rpc::{
     BatteryState, BodyControlOwner, BodyControlStatus, BodyKind, BodyState, BodyTransition,
-    CameraFrame, CameraInfo, CameraSample, CloudFrame, CloudKind, ControlState, ControllerMode,
-    ControllerState, Fault, FaultReport, FaultSeverity, FootContact, GeographicFix,
-    GeographicLocation, GeographicState, HealthStatus, ImuSample, JointCommand, JointSample,
-    JointState, LightSample, LocalizationQuality, LocalizationState, MapContent, MapContentInfo,
-    MapGrid, MapOperation, MapState, MotorState, MotorStates, MotorVoltagesResponse,
-    NavigationPath, OdometrySample, Pose, ProductOperation, ProductState, ProductStatus,
-    ProfileInfo, Quaternion, ReadinessState, Receipt as CommandReceipt, RobotStatus, SampleTime,
-    SystemInfo, Task, TaskRunState, TaskRunStatus, TaskState, TeleopReply, TeleopVelocity, Vector3,
-    VelocitySample,
+    CameraCalibration, CameraFrame, CameraInfo, CameraSample, CloudFrame, CloudKind, ControlState,
+    ControllerMode, ControllerState, Fault, FaultReport, FaultSeverity, FootContact, GeographicFix,
+    GeographicLocation, GeographicState, HealthStatus, ImuSample, InspectionBinding,
+    InspectionRoute, InspectionRoutes, InspectionTask, InspectionTaskListQuery, InspectionTasks,
+    JointCommand, JointSample, JointState, LightSample, LocalizationQuality, LocalizationState,
+    MapContent, MapContentInfo, MapGrid, MapOperation, MapState, MotorState, MotorStates,
+    MotorVoltagesResponse, NavigationPath, OdometrySample, PlanPreview, Pose, ProductOperation,
+    ProductState, ProductStatus, ProfileInfo, Quaternion, ReadinessState,
+    Receipt as CommandReceipt, RobotStatus, SampleTime, SystemInfo, Task, TaskRunState,
+    TaskRunStatus, TaskState, TeleopReply, TeleopVelocity, Vector3, VelocitySample,
 };
 pub use system::System;
 pub use tasks::Tasks;
