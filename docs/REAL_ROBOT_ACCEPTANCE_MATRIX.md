@@ -185,3 +185,5 @@ SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainste
 本窗口只读验证相机，不绑定账号、不发送运动/电机/导航/External 命令。机器人 `192.168.66.64` 的 Orbbec 彩色/深度帧仍以约 30Hz 增长，真实 go2rtc `1984/api/frame.jpeg?src=cam` 在预热后返回 JPEG。临时桥将这一 relay 映射到 `Observations` 相机 RPC：Rust `read_camera` 单帧收到 17,837 bytes，JPEG 头尾有效；`watch_camera_samples` 收到 10/10 帧，序号 `1..10`、唯一帧 `10/10`。证据为 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\sdk-camera-acceptance-20261115-go2rtc.json`。
 
 同一窗口冷启动时曾出现 go2rtc 请求 5 秒零字节超时；真实 WHEP 预热后连续请求恢复为 HTTP 200、约 0.12–0.99 秒，说明 relay 存在消费者/编码器就绪时序问题。临时桥已停止并清理，`50052` 与正式 `5052` 均不监听。因此本次通过只证明真实 relay 图像可被 SDK 消费和解码，不证明正式 Gateway 部署、冷启动就绪语义、手机 App 显示或公网 WHEP。局域网浏览器 WHEP 的独立通过证据仍为 `real-webrtc-acceptance-20261115.json`；公网和手机继续保持未验收。
+
+随后复核确认：正式 `lt-host` 未安装，`5050` 仍由独立 `gateway.video_probe` 提供；真实 LAN WHEP 查看器可连接并在 10 秒内将 `framesDecoded` 从 55 推进到 325，之后 5 次 JPEG 请求全部成功。该结果将 Gate 5 保持为 `FAIL/PASS_PARTIAL`，而不是正式 `PASS`：冷启动 readiness、正式 `5052`、App 真机和公网媒体仍未满足。正式部署门与 gRPC 独立 API key/TLS 要求见 robot-cloud [FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md](D:/DOSO/robot-cloud/docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)。
