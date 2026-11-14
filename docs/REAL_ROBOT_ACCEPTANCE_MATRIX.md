@@ -153,3 +153,23 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 ## 现阶段状态
 
 SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、视频、External 硬件接管和关闭回退仍需按本矩阵现场执行。未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
+
+## 2026-11-14 现场窗口记录
+
+本窗口完成了真机只读前置和云传输层验证。`192.168.66.64` 曾连续 ping 成功，`brainstem.service` 为 active，`127.0.0.1:13146` 的 `GetControlStatus` 读回 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重电机故障、无 gRPC lease。四路 CAN 在前置时均为 `UP/ERROR-ACTIVE/1Mbps`，IMU 设备存在，authorizer 与 cloud-link 制品哈希通过大小写不敏感比较。
+
+通过本机 authorizer API 开启只读云连接后，设备保存 `choice=true`，`doso-cloud-link` 进入 active，机器狗到 MQTT `8.153.169.177:8883` 的 TCP 连接为 `ESTABLISHED`，日志出现 `cloud_connected`。业务同步接口对该 UUID 返回 `permission:null`，因为研发库存仍未绑定账号，Gateway 没有向设备下发短期状态许可，因此 `POST /status` 和 `GET /status/latest` 仍为 `503 unavailable`。这证明传输层已通，不证明云端状态上报已通过。
+
+设备随后从局域网消失，无法完成云许可下发后的 `status.report`、App 状态读取和断云回退。该窗口没有发送运动、遥操作、电机、导航或 External 命令，也没有修改 CAN。
+
+| 门 | 当前结果 |
+| --- | --- |
+| 1 System | `BLOCKED`，13146 只读已通过，正式 5052/云状态投影待设备恢复并完成账号许可 |
+| 2 Motion | `NOT RUN` |
+| 3 Observations | `NOT RUN` |
+| 4 Localization/Maps | `NOT RUN` |
+| 5 Point cloud/Camera/Video | `NOT RUN` |
+| 6 Navigation | `NOT RUN` |
+| 7 External | `NOT RUN` |
+
+证据保存在 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\field-preflight-sudo-20261114.json`、`read-current-13146.json`、`real-cloud-activation-20261114.json` 和 `real-cloud-observe-20261114.json`。
