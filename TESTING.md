@@ -27,8 +27,8 @@
 | 协议生成 | 2 passed | 重复生成、导入、公开类型与清除旧绑定 |
 | 格式 / Clippy / 文档链接 | 通过 | Rust全部目标Clippy；333个当前本地文档链接 |
 | 打包与解包编译 | 通过，139文件 | crates.io索引超时后 `--offline -j 1` 成功；包含 TESTING.md |
-| 真机相机 SDK 单帧（临时 RTSP 桥） | 通过 | `Observations.CameraFrame` 返回 28,269 bytes，JPEG 头尾有效；不是正式 5052 Gateway |
-| 真机相机 SDK 连续流（临时 RTSP 桥） | 通过 | `Observations.WatchCameraSamples` 收到 10/10，序号 1–10，唯一帧 10/10；正式 go2rtc JPEG relay 仍阻塞 |
+| 真机相机 SDK 单帧（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.CameraFrame` 从真实 go2rtc JPEG relay 返回 17,837 bytes，JPEG 头尾有效；不是正式 5052 Gateway |
+| 真机相机 SDK 连续流（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.WatchCameraSamples` 收到 10/10，序号 1–10，唯一帧 10/10；冷启动曾出现 5 秒零字节超时 |
 | App/WHEP 代码回归 | 58 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于手机真机播放 |
 
 中间失败也保留：一次导航准入测试复用了成功 request_id，正确命中既有幂等 journal，测试改为新请求后通过；并行开发期间相机测试两次在收集阶段遇到巡检绑定导入错误，修正包路径/重新生成后 48 项通过。巡检新增测试也曾因夹具使用错误的环境错误码和急停状态结构出现2项失败；修正为现有owner实际合同后，窄测10项及统一323项通过。以上均不是现场传感器故障。最终完整 Rust 构建曾因 Windows 页面文件不足（os error 1455）和并行 rustc 内存分配失败中断；采用 `-j 1` 重跑，结果单独记录，不把资源失败改写成接口失败或直接忽略。
@@ -122,9 +122,9 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 
 ## 2026-11-15 视频现场窗口
 
-机器狗 `192.168.66.64` 的 Orbbec 源和 RTSP `8554/cam` 正常产帧。用临时只读 gRPC 桥把 RTSP 单帧转成 JPEG 后，Rust `read_camera` 成功保存 28,269 bytes，头尾为 `FFD8`/`FFD9`；`watch_camera_samples` 收到 10 帧，序号连续 `1..10`、唯一帧 `10/10`。原始证据为 [`sdk-camera-acceptance-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-camera-acceptance-20261115.json)。
+机器狗 `192.168.66.64` 的 Orbbec 源、RTSP `8554/cam` 和 go2rtc JPEG relay 均可产出真实图像。用临时只读 gRPC 桥读取真实 relay 后，Rust `read_camera` 成功保存 17,837 bytes，头尾为 `FFD8`/`FFD9`；`watch_camera_samples` 收到 10 帧，序号连续 `1..10`、唯一帧 `10/10`。原始证据为 [`sdk-camera-acceptance-20261115-go2rtc.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-camera-acceptance-20261115-go2rtc.json)。此前冷启动请求曾 5 秒零字节超时；真实 WHEP 预热后连续请求恢复为 HTTP 200、约 0.12–0.99 秒，因此 relay 仍需补明确的冷启动/就绪处理。
 
-同一窗口直接请求 go2rtc `1984/api/frame.jpeg?src=cam` 超时且为 0 bytes，而相机状态帧计数持续增长、RTSP 单帧约 28,552 bytes。临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流的真实解码路径，不证明正式 Gateway、relay 或 App/公网视频已经交付。
+临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流能消费真实 relay，不证明正式 Gateway 部署，也不掩盖 relay 冷启动时序问题或 App/公网视频尚未交付。
 
 App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 58 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示和公网 WHEP 仍未验收。
 
