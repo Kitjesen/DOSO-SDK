@@ -173,3 +173,5 @@ SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainste
 | 7 External | `NOT RUN` |
 
 证据保存在 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\field-preflight-sudo-20261114.json`、`read-current-13146.json`、`real-cloud-activation-20261114.json` 和 `real-cloud-observe-20261114.json`。
+
+2026-11-15 开机复核再次通过 13146 只读读取，结果仍为 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重故障、无 gRPC lease。`choice=true` 已保留，cloud-link unit 已设置为 enabled/active 并重新建立 MQTT TCP。当前 CAN USB 路径与旧映射记录不同，四路 CAN 虽均为 `UP/ERROR-ACTIVE/1Mbps`，只读映射检查仍阻断后续维护窗口。设备账号尚未绑定，Gateway 没有 reporting permission，因此七域真机主体动作继续保持未运行。
