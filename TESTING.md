@@ -1,6 +1,6 @@
 # SDK 测试记录
 
-更新：2026-11-14。功能和缺口集中在[逐板块清单](docs/features.md)，本页记录测试范围、结果和复现方法。API 文档与消息目录不各自维护一份测试总数。七域真机验收按[七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)执行。
+更新：2026-11-15。功能和缺口集中在[逐板块清单](docs/features.md)，本页记录测试范围、结果和复现方法。API 文档与消息目录不各自维护一份测试总数。七域真机验收按[七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)执行。
 
 ## 验证层级
 
@@ -27,6 +27,9 @@
 | 协议生成 | 2 passed | 重复生成、导入、公开类型与清除旧绑定 |
 | 格式 / Clippy / 文档链接 | 通过 | Rust全部目标Clippy；333个当前本地文档链接 |
 | 打包与解包编译 | 通过，139文件 | crates.io索引超时后 `--offline -j 1` 成功；包含 TESTING.md |
+| 真机相机 SDK 单帧（临时 RTSP 桥） | 通过 | `Observations.CameraFrame` 返回 28,269 bytes，JPEG 头尾有效；不是正式 5052 Gateway |
+| 真机相机 SDK 连续流（临时 RTSP 桥） | 通过 | `Observations.WatchCameraSamples` 收到 10/10，序号 1–10，唯一帧 10/10；正式 go2rtc JPEG relay 仍阻塞 |
+| App/WHEP 代码回归 | 58 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于手机真机播放 |
 
 中间失败也保留：一次导航准入测试复用了成功 request_id，正确命中既有幂等 journal，测试改为新请求后通过；并行开发期间相机测试两次在收集阶段遇到巡检绑定导入错误，修正包路径/重新生成后 48 项通过。巡检新增测试也曾因夹具使用错误的环境错误码和急停状态结构出现2项失败；修正为现有owner实际合同后，窄测10项及统一323项通过。以上均不是现场传感器故障。最终完整 Rust 构建曾因 Windows 页面文件不足（os error 1455）和并行 rustc 内存分配失败中断；采用 `-j 1` 重跑，结果单独记录，不把资源失败改写成接口失败或直接忽略。
 
@@ -41,7 +44,7 @@ Linux/Windows 的当前提交 CI 结果由 [GitHub Actions](https://github.com/K
 | localization | [location](tests/grpc/location.rs)、[task/state](tests/grpc/task_watch.rs)、[grpc.rs](tests/grpc.rs) | 真机 GNSS、源时间、真实地图定位与重定位 |
 | maps | [grpc.rs](tests/grpc.rs) 的地图/PCD/栅格/事务测试；Gateway 的 `test_grpc_map_content.py`、`test_grpc_map_grid.py` | mapd 实际落盘、加载与 Product 切换后补查、实机栅格/PCD |
 | navigation | [navigation](tests/grpc/navigation.rs)、[grpc.rs](tests/grpc.rs) 的任务/路线测试；Gateway 的 `test_grpc_navigation_options.py` | native 实际成路、真实到点、限速效果、暂停/取消停稳 |
-| observations | [observation_metadata](tests/grpc/observation_metadata.rs)、[formats](tests/message_formats.rs)、[grpc.rs](tests/grpc.rs) 的源事件/相机/点云；Gateway 相机/实时点云测试 | 15分钟并发长稳、加速度来源、当前部署关节索引、真机相机/内参、点云、手机渲染 |
+| observations | [observation_metadata](tests/grpc/observation_metadata.rs)、[formats](tests/message_formats.rs)、[grpc.rs](tests/grpc.rs) 的源事件/相机/点云；`examples/read_camera.rs`、`examples/watch_camera_samples.rs` | 15分钟并发长稳、加速度来源、当前部署关节索引、正式 5052 相机/内参、点云、手机渲染 |
 | tasks | [inspection](tests/grpc/inspection.rs)、[task_watch](tests/grpc/task_watch.rs)；Gateway 的 `test_grpc_inspection.py` 与原 HTTP 巡检回归 | 真机巡检轨迹/证据/报告和暂停恢复；统一跟随/Agent 历史尚无完整接口 |
 
 Gateway 测试文件位于相邻 `lingtu` 仓库，Rust 文件位于本仓库。原生服务未实际启动时，不能把测试替身的 ACK、路线或终态写为 native/真机验收。
@@ -116,6 +119,14 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 - 同日相机只读检查显示 LingTu Orbbec 原生相机为 `streaming`，约 `29.7 FPS`，但 `/api/v1/camera/snapshot` 返回 `503` 或超时，5052 正式 Gateway 未监听。当前没有真实 JPEG 帧或 SDK 连续相机流证据，不能称视频稳定。[相机检查](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-preflight-20261115.json)
 
 完整原始现场文件位于开发机 `D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/`，不随 SDK Git 包分发；[历史推进记录](docs/grpc-v1-progress.md)继续保留早期结果。
+
+## 2026-11-15 视频现场窗口
+
+机器狗 `192.168.66.64` 的 Orbbec 源和 RTSP `8554/cam` 正常产帧。用临时只读 gRPC 桥把 RTSP 单帧转成 JPEG 后，Rust `read_camera` 成功保存 28,269 bytes，头尾为 `FFD8`/`FFD9`；`watch_camera_samples` 收到 10 帧，序号连续 `1..10`、唯一帧 `10/10`。原始证据为 [`sdk-camera-acceptance-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-camera-acceptance-20261115.json)。
+
+同一窗口直接请求 go2rtc `1984/api/frame.jpeg?src=cam` 超时且为 0 bytes，而相机状态帧计数持续增长、RTSP 单帧约 28,552 bytes。临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流的真实解码路径，不证明正式 Gateway、relay 或 App/公网视频已经交付。
+
+App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 58 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示和公网 WHEP 仍未验收。
 
 ## 未执行和已知限制
 

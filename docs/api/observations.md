@@ -116,6 +116,8 @@ pub async fn watch_camera_samples(
 
 调用 `Observations.WatchCameraSamples`，沿用 `watch_camera()` 的发布、新帧等待、授权与资源释放规则，返回 `CameraSample`。`sequence` 为机器人服务 JPEG 发布计数，随服务重启重新计数。其余未知元数据保持缺失。序号适合观察发布进展，源采样时间由 `time` 的可用性单独表达。
 
+仓库示例 [`examples/watch_camera_samples.rs`](../../examples/watch_camera_samples.rs) 可按指定数量读取帧，校验 JPEG 头尾并统计序号/唯一帧数。它只验证 SDK 消费合同；正式部署仍要求机器人 Gateway 提供可用的 JPEG relay，不能把 RTSP 临时桥当成生产端点。
+
 以下示例覆盖相机查询与两种订阅形式，每种订阅读取一帧后显式结束。
 
 ```rust,no_run

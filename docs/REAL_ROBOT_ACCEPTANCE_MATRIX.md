@@ -1,6 +1,6 @@
 # DOSO SDK 七域真机验收矩阵
 
-更新日期：2026-11-14。本文用于 `rust` 分支的真实机器人验收。它描述验收动作和证据，不把本地 gRPC 合同测试、Gateway 仿真或历史现场记录写成真机通过。
+更新日期：2026-11-15。本文用于 `rust` 分支的真实机器人验收。它描述验收动作和证据，不把本地 gRPC 合同测试、Gateway 仿真或历史现场记录写成真机通过。
 
 ## 验收规则
 
@@ -101,10 +101,10 @@ cargo run --example measure_observations -- https://<gateway>:5052 900 both
 | SDK 入口 | `observations().camera_status()`、`camera_calibration()`、`camera_frame()`、`watch_camera_samples()`、`watch_point_cloud()`、`maps().point_cloud()` |
 | 相机执行 | 读取状态和内参。读取单帧 JPEG。持续接收 60 秒类型化帧，记录序号、尺寸、frame、时间和解码错误。 |
 | 点云执行 | 分别读取 scan 和 map 视图。持续接收 60 秒点云，记录 PCLD 版本、坐标系、点数、颜色字段、序号、重置和取消。 |
-| 视频执行 | 使用正式观看授权，通过 App 或批准的查看器确认画面持续解码。MQTT 只验证源启停消息，媒体帧走视频通道。 |
+| 视频执行 | 使用正式观看授权，通过 App 或批准的查看器确认画面持续解码。MQTT 只验证源启停消息，媒体帧走视频通道。临时 SDK 桥只用于隔离验证消息合同，不能替代正式 5052。 |
 | 通过标准 | JPEG 可解码，尺寸和内参字段一致。点云帧可解码，坐标系和代次保留，空帧与 reset 有明确语义。取消后流结束且资源释放。视频有持续帧增长、停止观看后源按合同退出。 |
 | 失败处理 | 权限错误、帧停流、元数据缺失、点云解码失败或取消不释放时停止该门，不把地图 PCD 当实时点云。 |
-| 证据 | `05-camera-pointcloud-video.json`、JPEG/点云摘要、视频观看记录、授权和取消日志。 |
+| 证据 | `05-camera-pointcloud-video.json`、`D:\DOSO\artifacts\robot-cloud\real-connect-20261113\sdk-camera-acceptance-20261115.json`、JPEG/点云摘要、视频观看记录、授权和取消日志。 |
 
 ## 6. Navigation 规划预览和一次真实到点
 
@@ -146,13 +146,13 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 | 2 Motion | `NOT RUN` |  |  |  |  |
 | 3 Observations | `NOT RUN` |  |  |  |  |
 | 4 Localization/Maps | `NOT RUN` |  |  |  |  |
-| 5 Point cloud/Camera/Video | `NOT RUN` |  |  |  |  |
+| 5 Point cloud/Camera/Video | `FAIL`（相机临时桥通过，正式 relay/5052、点云、App、公网未通过） | 2026-11-15 | SDK 1772245 | `D:\DOSO\artifacts\robot-cloud\real-connect-20261113` | 见相机窗口记录 |
 | 6 Navigation | `NOT RUN` |  |  |  |  |
 | 7 External | `NOT RUN` |  |  |  |  |
 
 ## 现阶段状态
 
-SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、视频、External 硬件接管和关闭回退仍需按本矩阵现场执行。观测门已有一次真实长稳失败记录，其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
+SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、External 硬件接管和关闭回退仍需按本矩阵现场执行。相机消息合同已通过一次临时 RTSP 桥隔离验收，但正式 JPEG relay 阻塞，Gate 5 仍为 `FAIL`；观测门已有一次真实长稳失败记录，其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
 
 ## 2026-11-14 现场窗口记录
 
@@ -179,3 +179,9 @@ SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainste
 同一窗口的 900 秒 IMU/关节并发测量在约 314 秒收到 `GOAWAY error 11` 并结束。原始直连 IMU 平均 `99.923Hz`，16 个关节约 `98.87–98.90Hz`，但目标窗口没有完成。Rust SDK 观测桥在约 318 秒结束，桥接路径的关节统计约 `46Hz`。因此当前 Gate 3 记录为 `FAIL`，下一步先处理 Brainstem gRPC 长连接稳定性，再重做 900 秒窗口。原始证据为 `D:\DOSO\artifacts\robot-cloud\sdk-field-20261112\current-concurrent-20261114T163345Z.json`、`current-sdk-20261114T163345Z.log` 和 `raw-bdp-on-900s-20261114T163409Z.json`。
 
 同日相机只读检查显示 LingTu Orbbec 原生相机服务为 `streaming`，状态接口报告约 `29.7 FPS`、彩色帧累计超过 28 万帧、最近帧约 442ms。真实 `/api/v1/camera/snapshot` 返回 `503` 或等待超时，正式 5052 SDK Gateway 仍未监听，尚未收到可解码 JPEG 或连续 SDK 相机流。因此 Gate 5 当前记录为 `FAIL`，相机源状态通过不等于 SDK 图像链路通过。证据为 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\camera-preflight-20261115.json`。
+
+## 2026-11-15 视频 SDK 隔离窗口
+
+本窗口只读验证相机，不绑定账号、不发送运动/电机/导航/External 命令。机器人 `192.168.66.64` 的 Orbbec 彩色/深度帧仍以约 30Hz 增长，RTSP `8554/cam` 可由 ffmpeg 取出约 28KB JPEG。临时桥将这一真实 RTSP 源映射到 `Observations` 相机 RPC：Rust `read_camera` 单帧收到 28,269 bytes，JPEG 头尾有效；`watch_camera_samples` 收到 10/10 帧，序号 `1..10`、唯一帧 `10/10`。证据为 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\sdk-camera-acceptance-20261115.json`。
+
+同一时间，机器人本机 go2rtc `1984/api/frame.jpeg?src=cam` 请求在 5 秒后超时且返回 0 bytes，尽管源状态和 RTSP 正常。临时桥已停止并清理，`50052` 与正式 `5052` 均不监听。因此本次通过只证明真实图像可被 SDK 消费和解码，不证明正式 Gateway/JPEG relay、手机 App 显示或公网 WHEP。局域网浏览器 WHEP 的独立通过证据仍为 `real-webrtc-acceptance-20261115.json`；公网和手机继续保持未验收。
