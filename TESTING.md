@@ -126,7 +126,7 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 
 临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流能消费真实 relay，不证明正式 Gateway 部署，也不掩盖 relay 冷启动时序问题或 App/公网视频尚未交付。
 
-App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 58 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示和公网 WHEP 仍未验收。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
+App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 58 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
 
 ## 未执行和已知限制
 
