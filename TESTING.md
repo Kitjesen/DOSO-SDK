@@ -29,7 +29,10 @@
 | 打包与解包编译 | 通过，139文件 | crates.io索引超时后 `--offline -j 1` 成功；包含 TESTING.md |
 | 真机相机 SDK 单帧（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.CameraFrame` 从真实 go2rtc JPEG relay 返回 17,837 bytes，JPEG 头尾有效；不是正式 5052 Gateway |
 | 真机相机 SDK 连续流（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.WatchCameraSamples` 收到 10/10，序号 1–10，唯一帧 10/10；冷启动曾出现 5 秒零字节超时 |
-| App/WHEP 代码回归 | 58 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于手机真机播放 |
+| App/WHEP 代码回归 | 59 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于手机真机播放 |
+| App 设备发现/绑定回归 | 76 passed | QR、设备归属、直接机器狗连接和本地多设备 PostgreSQL 合同；不绑定真实账号 |
+| App 原生点云编译检查 | 1 passed | JBR 21 + Android SDK，真实 Expo modules compile jar；不等于真机点云帧验收 |
+| 云端媒体合同回归 | 9 passed | `doso-cloud-media` 会话/授权/过期/释放；使用本地上游替身，不等于公网媒体 |
 
 中间失败也保留：一次导航准入测试复用了成功 request_id，正确命中既有幂等 journal，测试改为新请求后通过；并行开发期间相机测试两次在收集阶段遇到巡检绑定导入错误，修正包路径/重新生成后 48 项通过。巡检新增测试也曾因夹具使用错误的环境错误码和急停状态结构出现2项失败；修正为现有owner实际合同后，窄测10项及统一323项通过。以上均不是现场传感器故障。最终完整 Rust 构建曾因 Windows 页面文件不足（os error 1455）和并行 rustc 内存分配失败中断；采用 `-j 1` 重跑，结果单独记录，不把资源失败改写成接口失败或直接忽略。
 
@@ -126,7 +129,7 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 
 临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流能消费真实 relay，不证明正式 Gateway 部署，也不掩盖 relay 冷启动时序问题或 App/公网视频尚未交付。
 
-App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 58 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
+App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 59 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
 
 ## 未执行和已知限制
 
