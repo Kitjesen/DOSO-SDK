@@ -111,6 +111,8 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 - 这次 60 秒完成不抵消此前失败，也不证明 15 分钟稳定、同步采样、端到端延迟或机器人本机 Gateway 性能。
 - 历史约 200.319 秒停流的根因仍未证明；约 316 秒 GOAWAY(11) 已定位为 grpc-dart 5.2 keepalive 路径；另有服务冲突引发 shutdown 超时，以及 USB CAN 断开/重枚举 DOWN 的独立事件。它们不能合并成一个 SDK 原因。
 - keepalive、loopback 13146、read-stream close 候选已完成各自离线验证和 ARM64 构建，但没有在本轮激活；不能用候选测试替代运行服务的验收。
+- 2026-11-15 真机只读电机读取通过：`GetMotorStatus` 返回 16/16 在线，离线列表、非零状态码和错误列表均为空，报告温度 26–28°C。该接口没有样本时间和有效位，不能由一次读取推导长期健康。
+- 同日 900 秒 IMU/关节并发窗口实际运行约 314 秒后收到 `GOAWAY error 11`。原始直连 IMU 99.923Hz，16 个关节约 98.87–98.90Hz；Rust SDK 观测桥在同一连接结束前统计到约 46Hz，窗口未完成。该结果保留为当前真机稳定性失败，不能写成 15 分钟通过。测试工具启动等待已从 5 秒扩大为 30 秒，避免把观测桥启动慢误判为采样失败。[并发记录](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-concurrent-20261114T163345Z.json) · [SDK日志](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-sdk-20261114T163345Z.log) · [原始流](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/raw-bdp-on-900s-20261114T163409Z.json)
 
 完整原始现场文件位于开发机 `D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/`，不随 SDK Git 包分发；[历史推进记录](docs/grpc-v1-progress.md)继续保留早期结果。
 

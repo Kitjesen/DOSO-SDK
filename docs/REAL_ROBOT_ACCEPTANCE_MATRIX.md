@@ -152,7 +152,7 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 
 ## 现阶段状态
 
-SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、视频、External 硬件接管和关闭回退仍需按本矩阵现场执行。未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
+SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、视频、External 硬件接管和关闭回退仍需按本矩阵现场执行。观测门已有一次真实长稳失败记录，其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
 
 ## 2026-11-14 现场窗口记录
 
@@ -175,3 +175,5 @@ SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainste
 证据保存在 `D:\DOSO\artifacts\robot-cloud\real-connect-20261113\field-preflight-sudo-20261114.json`、`read-current-13146.json`、`real-cloud-activation-20261114.json` 和 `real-cloud-observe-20261114.json`。
 
 2026-11-15 开机复核再次通过 13146 只读读取，结果仍为 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重故障、无 gRPC lease。`choice=true` 已保留，cloud-link unit 已设置为 enabled/active 并重新建立 MQTT TCP。当前 CAN USB 路径与旧映射记录不同，四路 CAN 虽均为 `UP/ERROR-ACTIVE/1Mbps`，只读映射检查仍阻断后续维护窗口。设备账号尚未绑定，Gateway 没有 reporting permission，因此七域真机主体动作继续保持未运行。
+
+同一窗口的 900 秒 IMU/关节并发测量在约 314 秒收到 `GOAWAY error 11` 并结束。原始直连 IMU 平均 `99.923Hz`，16 个关节约 `98.87–98.90Hz`，但目标窗口没有完成。Rust SDK 观测桥在约 318 秒结束，桥接路径的关节统计约 `46Hz`。因此当前 Gate 3 记录为 `FAIL`，下一步先处理 Brainstem gRPC 长连接稳定性，再重做 900 秒窗口。原始证据为 `D:\DOSO\artifacts\robot-cloud\sdk-field-20261112\current-concurrent-20261114T163345Z.json`、`current-sdk-20261114T163345Z.log` 和 `raw-bdp-on-900s-20261114T163409Z.json`。
