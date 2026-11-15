@@ -119,7 +119,7 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 - keepalive、loopback 13146、read-stream close 候选已完成各自离线验证和 ARM64 构建，但没有在本轮激活；不能用候选测试替代运行服务的验收。
 - 2026-11-15 真机只读电机读取通过：`GetMotorStatus` 返回 16/16 在线，离线列表、非零状态码和错误列表均为空，报告温度 26–28°C。该接口没有样本时间和有效位，不能由一次读取推导长期健康。
 - 同日 900 秒 IMU/关节并发窗口实际运行约 314 秒后收到 `GOAWAY error 11`。原始直连 IMU 99.923Hz，16 个关节约 98.87–98.90Hz；Rust SDK 观测桥在同一连接结束前统计到约 46Hz，窗口未完成。该结果保留为当前真机稳定性失败，不能写成 15 分钟通过。测试工具启动等待已从 5 秒扩大为 30 秒，避免把观测桥启动慢误判为采样失败。[并发记录](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-concurrent-20261114T163345Z.json) · [SDK日志](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-sdk-20261114T163345Z.log) · [原始流](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/raw-bdp-on-900s-20261114T163409Z.json)
-- 同日相机只读检查显示 LingTu Orbbec 原生相机为 `streaming`，约 `29.7 FPS`，但 `/api/v1/camera/snapshot` 返回 `503` 或超时，5052 正式 Gateway 未监听。当前没有真实 JPEG 帧或 SDK 连续相机流证据，不能称视频稳定。[相机检查](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-preflight-20261115.json)
+- 同日冷启动相机只读检查显示 LingTu Orbbec 原生相机为 `streaming`，约 `29.7 FPS`，但 `/api/v1/camera/snapshot` 曾返回 `503` 或超时，5052 正式 Gateway 未监听。[冷启动检查](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-preflight-20261115.json)
 
 完整原始现场文件位于开发机 `D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/`，不随 SDK Git 包分发；[历史推进记录](docs/grpc-v1-progress.md)继续保留早期结果。
 
@@ -130,6 +130,10 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流能消费真实 relay，不证明正式 Gateway 部署，也不掩盖 relay 冷启动时序问题或 App/公网视频尚未交付。
 
 App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 59 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
+
+## 2026-11-15 当前只读复核
+
+随后在同一台机器狗上重新做了无副作用复核：5050 相机状态为 `200/streaming`，Orbbec 约 `29.6 FPS`；在 LAN WHEP 观看者预热后，连续 5 次 `/api/v1/camera/snapshot` 均为有效 JPEG（25,277–25,600 bytes，5 个 SHA-256 均不同）。原始窗口见 [`camera-warm-readonly-20261115T013709Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-readonly-20261115T013709Z.json)。这把“预热后 relay 可读”从历史记录变成了当前窗口证据，但不改变正式 SDK 门：现场 `brainstem.service` 当前为 inactive，13146/5052 未监听，5050 仍是独立 video probe；正式 5052、App 真机显示和公网 WHEP 仍未通过。
 
 ## 未执行和已知限制
 
