@@ -29,7 +29,7 @@
 | 打包与解包编译 | 通过，139文件 | crates.io索引超时后 `--offline -j 1` 成功；包含 TESTING.md |
 | 真机相机 SDK 单帧（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.CameraFrame` 从真实 go2rtc JPEG relay 返回 17,837 bytes，JPEG 头尾有效；不是正式 5052 Gateway |
 | 真机相机 SDK 连续流（临时 gRPC 桥） | 通过（relay 预热后） | `Observations.WatchCameraSamples` 收到 10/10，序号 1–10，唯一帧 10/10；冷启动曾出现 5 秒零字节超时 |
-| App/WHEP 代码回归 | 59 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于手机真机播放 |
+| App/WHEP 代码回归 | 60 passed | `cloud-video`、`native-video-acceptance`、`whep-receiver`、surface/viewer tests；不等于正式 App 控制页播放 |
 | App 设备发现/绑定回归 | 76 passed | QR、设备归属、直接机器狗连接和本地多设备 PostgreSQL 合同；不绑定真实账号 |
 | App 原生点云编译检查 | 1 passed | JBR 21 + Android SDK，真实 Expo modules compile jar；不等于真机点云帧验收 |
 | 云端媒体合同回归 | 9 passed | `doso-cloud-media` 会话/授权/过期/释放；使用本地上游替身，不等于公网媒体 |
