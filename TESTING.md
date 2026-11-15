@@ -137,13 +137,13 @@ App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 sur
 
 ## 2026-11-15 视频 producer 修复后复核
 
-新鲜现场复核发现 go2rtc 的 `cam` producer 配置曾为空，恢复后旧配置又引用机端不存在的 `/usr/local/bin/lingtu_camera_webrtc`。已在机器狗保留两份配置备份，并只将 producer 切换到已安装的 `/opt/lingtu/current/bin/lingtu_camera_go2rtc_mpegts.sh`，重启 `go2rtc.service`；没有改 Brainstem、CAN、电机、运动命令或云连接。修复后 LAN WHEP 返回 201，Edge 真实解码为 640×480、首帧约 6.2 秒，10 个连续采样点增长；5 次相机快照均为完整且不同的 JPEG（25,941–26,204 bytes）。证据见 [`video-config-repair-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json)、[`camera-warm-current-20261115T0429Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-current-20261115T0429Z.json) 和 [`real-webrtc-acceptance-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json)。
+新鲜现场复核发现 go2rtc 的 `cam` producer 配置曾为空，恢复后旧配置又引用机端不存在的 `/usr/local/bin/lingtu_camera_webrtc`。已在机器狗保留配置备份，并只将 producer 切换到已安装、带父进程信号回收的 `/opt/lingtu/current/bin/lingtu_camera_go2rtc_mpegts.py`，重启 `go2rtc.service`；没有改 Brainstem、CAN、电机、运动命令或云连接。修复后 LAN WHEP 返回 201，Edge 真实解码为 640×480、首帧约 6.2 秒，10 个连续采样点增长且 0 丢包；查看器退出后编码子进程为空。证据见 [`video-producer-pdeath-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-pdeath-20261115.json) 和 [`camera-warm-current-20261115T0429Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-current-20261115T0429Z.json)。
 
 该复核提升的是“真机局域网媒体源/查看器”结果；Rust SDK 仍只能通过此前的临时只读 gRPC bridge 记为 `PASS_PARTIAL`，正式 SDK Gateway `5052` 尚未监听，因此没有把这次视频服务修复写成正式 SDK 单帧/连续流通过。
 
 现场随后只读确认 `lt-host.service` inactive、`5052` 未监听，且缺少 `lt-host` 与 ProductControl session/env 输入；见 [`formal-gateway-live-check-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/formal-gateway-live-check-20261115.json)。因此正式 SDK 单帧/连续流的下一步不是新增 Rust API，而是完成匹配版本的 native release、TLS/API key 和 session，再用现有 `read_camera`/`watch_camera_samples` 示例重跑。
 
-媒体清理边界也已记录：go2rtc `consumers=[]` 不等于 exec producer 已退出；一次现场窗口遗留的 root encoder 已精确清理，正式 Gateway/媒体部署需把 producer 回收纳入验收。[清理证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-cleanup-20261115.json)
+媒体清理边界也已记录：最终 `.py` producer 窗口证明 `consumers=[]` 与编码进程退出同时成立；早期 `.sh` 遗留和 DELETE 会修改配置状态的事实见[历史清理记录](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-cleanup-20261115.json)。正式 Gateway/媒体部署需保留 `.py` wrapper 和 producer 回收验收。
 
 同一时刻的 Brainstem 只读故障快照显示 `thunder-dualpose-can.service=failed`，四路 CAN 均为 `DOWN`，实际 USB 父路径与 unit 声明不一致（`can0` 实际 `1-2.1`，声明 `1-1.2`）。`can-check.py --check` 因此拒绝配置并退出；没有执行 `ip link`、重启或映射修正。[故障快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/brainstem-can-readonly-20261115T014429Z.json)
 
