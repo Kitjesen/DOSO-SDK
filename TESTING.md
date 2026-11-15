@@ -141,6 +141,8 @@ App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 sur
 
 该复核提升的是“真机局域网媒体源/查看器”结果；Rust SDK 仍只能通过此前的临时只读 gRPC bridge 记为 `PASS_PARTIAL`，正式 SDK Gateway `5052` 尚未监听，因此没有把这次视频服务修复写成正式 SDK 单帧/连续流通过。
 
+现场随后只读确认 `lt-host.service` inactive、`5052` 未监听，且缺少 `lt-host` 与 ProductControl session/env 输入；见 [`formal-gateway-live-check-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/formal-gateway-live-check-20261115.json)。因此正式 SDK 单帧/连续流的下一步不是新增 Rust API，而是完成匹配版本的 native release、TLS/API key 和 session，再用现有 `read_camera`/`watch_camera_samples` 示例重跑。
+
 同一时刻的 Brainstem 只读故障快照显示 `thunder-dualpose-can.service=failed`，四路 CAN 均为 `DOWN`，实际 USB 父路径与 unit 声明不一致（`can0` 实际 `1-2.1`，声明 `1-1.2`）。`can-check.py --check` 因此拒绝配置并退出；没有执行 `ip link`、重启或映射修正。[故障快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/brainstem-can-readonly-20261115T014429Z.json)
 
 隔离 Android 视频接收器随后完成真实 LAN WHEP 验收：当前源码构建的 x86_64 `com.doso.robot.videotest` 读取 `192.168.66.64:5050` 后进入 `视频：receiving`，原生 `whep-native-player` 节点存在，日志有 `setRemoteDescription`、`ontrack` 和持续 `getStats`；停止后当前会话释放。该窗口同时暴露并修复了 App 对 go2rtc `201` 无 `Location` 响应的兼容边界：仅 `backend=go2rtc` 接受此响应，native WHEP 仍要求资源地址。原始证据为 [`app-video-isolated-acceptance-20261115T031720Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-video-isolated-acceptance-20261115T031720Z.json)，代码回归见 App `whep-receiver.test.mjs`（34 项通过）。这仍不是正式 5052 或主 App 控制页验收。
