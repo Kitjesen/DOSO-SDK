@@ -191,3 +191,5 @@ SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainste
 ## 2026-11-15 当前只读复核
 
 当前窗口的真实只读结果为：`5050` 相机状态 `200/streaming`、Orbbec 约 `29.6 FPS`；LAN WHEP 观看者预热后，连续 5 次快照均返回完整 JPEG（25,277–25,600 bytes，5 个不同哈希）。证据为 [`camera-warm-readonly-20261115T013709Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-readonly-20261115T013709Z.json)。同一窗口再次确认 `brainstem.service=inactive`、13146 未监听、正式 5052 未监听，因此这些快照不能升级为 SDK 单帧通过；它们只证明预热后的独立 5050 relay 可读。冷启动 503/等待、正式 Gateway、App 真机和公网媒体仍是 Gate 5 的未完成项。
+
+同窗口的机端故障快照确认 `thunder-dualpose-can.service` 因 USB-CAN 父路径与声明拓扑不一致而失败（`can0` 实际 `1-2.1`，unit 期望 `1-1.2`），四路接口均保持 `DOWN`。这解释了 Brainstem/13146 未启动，但不授权我们猜测映射或改动现场；后续维护窗口必须先由现场确认物理标签，再单独修正并重做 System 门。[只读快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/brainstem-can-readonly-20261115T014429Z.json)

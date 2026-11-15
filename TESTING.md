@@ -135,6 +135,8 @@ App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 sur
 
 随后在同一台机器狗上重新做了无副作用复核：5050 相机状态为 `200/streaming`，Orbbec 约 `29.6 FPS`；在 LAN WHEP 观看者预热后，连续 5 次 `/api/v1/camera/snapshot` 均为有效 JPEG（25,277–25,600 bytes，5 个 SHA-256 均不同）。原始窗口见 [`camera-warm-readonly-20261115T013709Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-readonly-20261115T013709Z.json)。这把“预热后 relay 可读”从历史记录变成了当前窗口证据，但不改变正式 SDK 门：现场 `brainstem.service` 当前为 inactive，13146/5052 未监听，5050 仍是独立 video probe；正式 5052、App 真机显示和公网 WHEP 仍未通过。
 
+同一时刻的 Brainstem 只读故障快照显示 `thunder-dualpose-can.service=failed`，四路 CAN 均为 `DOWN`，实际 USB 父路径与 unit 声明不一致（`can0` 实际 `1-2.1`，声明 `1-1.2`）。`can-check.py --check` 因此拒绝配置并退出；没有执行 `ip link`、重启或映射修正。[故障快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/brainstem-can-readonly-20261115T014429Z.json)
+
 ## 未执行和已知限制
 
 - 本轮未运行完整仿真、真实地图导航、机器人动作、External策略、手机/Android实装或真实公网视频。
