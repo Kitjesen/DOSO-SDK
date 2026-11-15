@@ -129,11 +129,17 @@ cargo run --example measure_observations -- http://<正式Gateway>:5052 900 both
 
 临时桥已停止并清理，机器狗没有留下 `50052`；正式 `5052` 未监听。因此这证明 SDK JPEG 消息和连续流能消费真实 relay，不证明正式 Gateway 部署，也不掩盖 relay 冷启动时序问题或 App/公网视频尚未交付。
 
-App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 59 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
+App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 surface/viewer 回归共 60 项通过；这些是代码/合同验收。局域网 WebRTC/WHEP 浏览器接收器已有真实通过证据（见 robot-cloud `real-webrtc-acceptance-20261115.json`），手机 App 真机显示仍未验收。对公网候选 `media-test.dosorobotics.com` 的只读 status/WHEP 请求均为 404，证据为 `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json`，因此公网 WHEP 尚未部署。后续只读检查观察到机器人的 go2rtc/相机/视频服务有较新的启动时间；本段记录的历史窗口没有发起重启，服务生命周期不作为 SDK 通过依据。
 
 ## 2026-11-15 当前只读复核
 
 随后在同一台机器狗上重新做了无副作用复核：5050 相机状态为 `200/streaming`，Orbbec 约 `29.6 FPS`；在 LAN WHEP 观看者预热后，连续 5 次 `/api/v1/camera/snapshot` 均为有效 JPEG（25,277–25,600 bytes，5 个 SHA-256 均不同）。原始窗口见 [`camera-warm-readonly-20261115T013709Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-readonly-20261115T013709Z.json)。这把“预热后 relay 可读”从历史记录变成了当前窗口证据，但不改变正式 SDK 门：现场 `brainstem.service` 当前为 inactive，13146/5052 未监听，5050 仍是独立 video probe；正式 5052、App 真机显示和公网 WHEP 仍未通过。
+
+## 2026-11-15 视频 producer 修复后复核
+
+新鲜现场复核发现 go2rtc 的 `cam` producer 配置曾为空，恢复后旧配置又引用机端不存在的 `/usr/local/bin/lingtu_camera_webrtc`。已在机器狗保留两份配置备份，并只将 producer 切换到已安装的 `/opt/lingtu/current/bin/lingtu_camera_go2rtc_mpegts.sh`，重启 `go2rtc.service`；没有改 Brainstem、CAN、电机、运动命令或云连接。修复后 LAN WHEP 返回 201，Edge 真实解码为 640×480、首帧约 6.2 秒，10 个连续采样点增长；5 次相机快照均为完整且不同的 JPEG（25,941–26,204 bytes）。证据见 [`video-config-repair-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json)、[`camera-warm-current-20261115T0429Z.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-current-20261115T0429Z.json) 和 [`real-webrtc-acceptance-20261115.json`](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json)。
+
+该复核提升的是“真机局域网媒体源/查看器”结果；Rust SDK 仍只能通过此前的临时只读 gRPC bridge 记为 `PASS_PARTIAL`，正式 SDK Gateway `5052` 尚未监听，因此没有把这次视频服务修复写成正式 SDK 单帧/连续流通过。
 
 同一时刻的 Brainstem 只读故障快照显示 `thunder-dualpose-can.service=failed`，四路 CAN 均为 `DOWN`，实际 USB 父路径与 unit 声明不一致（`can0` 实际 `1-2.1`，声明 `1-1.2`）。`can-check.py --check` 因此拒绝配置并退出；没有执行 `ip link`、重启或映射修正。[故障快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/brainstem-can-readonly-20261115T014429Z.json)
 

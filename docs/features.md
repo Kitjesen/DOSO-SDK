@@ -96,7 +96,7 @@
 | 单关节/整帧事件 | `watch_joints` | Brainstem ListenJoint | 本地已测；同次现场 16 轴各约 99.931–99.965Hz，最大间隔约 108.582ms。不拼造同步帧；索引见[关节编号](api/observations.md#doso-thunder-16-轴编号) |
 | 电机状态、温度、原始错误 | `motors` | Brainstem GetMotorState | 本地字段与错误已测；无统一有效位和采样时间，离线默认值不证明健康 |
 | 电机母线电压 | `motor_voltages` | Brainstem CAN 参数查询 | 本地已测；0 也可能超时，不是 BMS，不推算 SOC |
-| 相机状态与 JPEG | `camera_status`、`camera_frame`、`watch_camera` | 现有 JPEG relay、媒体访问规则 | 真实 go2rtc relay→临时桥→SDK 单帧已通过（需预热）；正式 5052 未部署，冷启动就绪语义仍待修复 |
+| 相机状态与 JPEG | `camera_status`、`camera_frame`、`watch_camera` | 现有 JPEG relay、媒体访问规则 | 真机 go2rtc producer 修复后 LAN relay/WHEP 与 5/5 JPEG 窗口通过；临时桥 SDK 单帧已通过；正式 5052 未部署，冷启动就绪语义仍需正式 Gateway 验收 |
 | 类型化帧与源相机内参 | `camera_sample`、`watch_camera_samples`、`camera_calibration` | relay 发布序号、真实相机 CameraIntrinsics | 真实 relay 连续 10 帧/序号 1–10 已通过（需预热）；正式 5052、内参对应关系、手机渲染仍未验收 |
 | 实时扫描/地图显示点云 | `watch_point_cloud`、`CloudFrame::decode` | CloudViewer 显示发布器 | 本地缓存/reset/颜色/跨线程/超大帧已测；PCLD v2 为量化预览，地图约 4Hz/扫描约 10Hz，真机流未验收 |
 | 场景摘要 | `scene` | 当前场景图缓存 | 本地已测；取决于 Host 所装配感知服务 |
