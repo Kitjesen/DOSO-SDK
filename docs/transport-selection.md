@@ -2,7 +2,17 @@
 
 日期：2026-11-02。七域 Rust SDK 已采用 **gRPC + Protobuf**，客户端使用 **Tonic 0.14 + Prost 0.14 + Tokio**。当前实现见 [Rust SDK](usage.md)，验证记录见 [gRPC 推进记录](grpc-v1-progress.md)。
 
-## 实施决定
+## 当前实施决定
+
+本地控制路径直接使用 Brainstem 原生 gRPC，不部署额外的 5052 Gateway：
+
+```text
+应用 → DOSO Rust SDK BrainstemClient → gRPC / Protobuf :13145 → Brainstem
+```
+
+`13145` 只由 Brainstem 持有，负责 CAN、IMU、关节、电机和运动仲裁。SDK 不打开硬件设备，也不创建第二个硬件 owner。云连接使用回环只读端口 `13146`，不能发送运动命令。
+
+七域高层合同仍保留为可选 LingTu 接入：
 
 ```text
 应用 → DOSO Rust SDK → gRPC / Protobuf :5052
@@ -11,7 +21,7 @@
 
 协议统一维护于 [`proto/`](../proto/)。Rust 构建生成客户端与消息；`python scripts/generate_grpc.py --lingtu ../lingtu` 生成机器人端 Python bindings。七域共享连接，核心调用全部采用 async，导航任务状态采用 server streaming。
 
-`http://127.0.0.1:5052` 是明文 HTTP/2 gRPC endpoint，消息使用 Protobuf。gRPC 基于 HTTP/2，使用这个地址前缀不代表继续发送 REST/JSON。当前没有通信基准结果，不承诺固定的延迟或吞吐提升比例。
+`http://127.0.0.1:13145` 是当前 Rust `BrainstemClient` 使用的明文开发 HTTP/2 gRPC endpoint，消息使用 Protobuf。该客户端当前不接受 `https://`，所以 `13145` 只能在受控的本地网络使用，生产 mTLS 接入需要先补齐客户端 TLS 配置。`5052` 只在未来部署 LingTu Gateway 时启用，当前产品路径不依赖它。
 
 机器人端 handler 调用现有共享操作和 owner，没有通过旧 Gateway REST 代理七域业务。Web 的 HTTP :5050 继续调用相同操作；ProductControl 仍使用本机 HTTP :5051。原生 DDS、mapd socket 和 Brainstem gRPC 保留各自职责。
 

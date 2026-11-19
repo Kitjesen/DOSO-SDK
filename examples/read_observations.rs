@@ -4,7 +4,9 @@ use doso_sdk::{Config, DosoClient};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.len() == 1 && matches!(arguments[0].as_str(), "--help" | "-h") {
-        println!("Read-only IMU and joints: read_observations <http(s)://robot:5052>");
+        println!(
+            "Read-only motor voltage, IMU and joints: read_observations <http(s)://robot:5052>"
+        );
         return Ok(());
     }
     if arguments.len() != 1 {
@@ -14,6 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.api_key = std::env::var("DOSO_API_KEY").ok();
     let robot = DosoClient::with_config(config).await?;
     let observations = robot.observations();
+    let voltages = observations.motor_voltages().await?;
+    println!("motor_bus_voltage_v={:?}", voltages.volts);
     let (mut imu, mut joints) =
         tokio::try_join!(observations.watch_imu(), observations.watch_joints())?;
 

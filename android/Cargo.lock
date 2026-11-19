@@ -145,7 +145,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "doso-sdk"
-version = "0.2.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "prost",

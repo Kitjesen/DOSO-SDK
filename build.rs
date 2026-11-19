@@ -17,5 +17,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     protos.sort();
     tonic_prost_build::configure().compile_protos(&protos, &["proto".into()])?;
     println!("cargo:rerun-if-changed=proto");
+
+    // Brainstem is a separate, lower-level protocol. Keep its generated
+    // namespace distinct from the public DOSO seven-domain contract.
+    let brainstem_protos = [
+        "brainstem/protocol/brainstem_api/cms.proto",
+        "brainstem/protocol/brainstem_api/common.proto",
+        "brainstem/protocol/brainstem_api/external.proto",
+    ];
+    tonic_prost_build::configure().compile_protos(&brainstem_protos, &["brainstem/protocol"])?;
+    println!("cargo:rerun-if-changed=brainstem/protocol");
     Ok(())
 }

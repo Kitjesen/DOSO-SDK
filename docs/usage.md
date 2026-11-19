@@ -1,26 +1,26 @@
 # DOSO Rust SDK
 
-`doso-sdk` 是 V1 的异步 Rust 客户端，通过 **gRPC + Protobuf** 连接 LingTu Gateway。七个领域共用连接、请求元数据和错误处理。
+`doso-sdk` 是 V1 的异步 Rust 客户端。运动和实时观测优先通过 `BrainstemClient` 以 **gRPC + Protobuf** 直连机器狗 `13145`；地图、SLAM、导航和任务等高层能力由可选的 `DosoClient` 连接 LingTu Gateway。两套客户端共用错误类型，但协议和服务端职责不同。
 
 本页提供构建与常用调用流程。完整函数签名、参数、返回和失败行为按领域维护于API手册。[API手册](api/README.md)
 
 ## 构建与接入
 
-需要 Rust 1.94 或更新版本，以及 PATH 中可用的 `protoc`。也可以用 `PROTOC` 环境变量指定编译器路径。`build.rs` 从本 crate 的 `proto/` 生成 Rust 类型和客户端；Cargo.lock 固定仓库已解析的依赖版本。
+需要 Rust 1.94 或更新版本，以及 PATH 中可用的 `protoc`。也可以用 `PROTOC` 环境变量指定编译器路径。`build.rs` 从本 crate 的 `proto/` 和内置 `brainstem/protocol/` 生成 Rust 类型和客户端；Cargo.lock 固定仓库已解析的依赖版本。
 
 在 DOSO-SDK 根目录执行：
 
 ```text
 cargo build --workspace --locked
 cargo test --workspace --locked
-cargo run -p doso-sdk --example read_status -- --help
+cargo run -p doso-sdk --example read_brainstem -- http://127.0.0.1:13145
 ```
 
-在应用的 Cargo.toml 中引用 GitHub 的 `rust` 分支，并启用 Tokio 运行时：
+在应用的 Cargo.toml 中固定 SDK 版本，并启用 Tokio 运行时：
 
 ```toml
 [dependencies]
-doso-sdk = { git = "https://github.com/Kitjesen/DOSO-SDK.git", branch = "rust" }
+doso-sdk = { git = "https://github.com/Kitjesen/DOSO-SDK.git", tag = "v0.2.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-这里的 `http://` 指 gRPC 的 HTTP/2 明文端点，传输内容为 Protobuf；不是旧版 REST/JSON 地址。`connect(...).await` 先建立通道，再完成 `System.Handshake`，协议匹配后才返回客户端。握手不获取运动控制权、不提交动作。
+`http://` 使用 HTTP/2 明文 gRPC 和 Protobuf。`DosoClient::connect().await` 建立通道后完成只读 `System.Handshake`。机器狗上的本地程序可使用 `BrainstemClient::connect("http://127.0.0.1:13145")`。从电脑连接配置了 mTLS 的机器狗时，使用 `https://` 和已配对的客户端证书。[直连 API](api/brainstem.md)
 
 `system().info()` 同步借用最近成功握手的 `SystemInfo`，包含固件版本 `firmware_version`、机器人版本 `robot_version` 和机器人 ID `robot_id`。固件版本取当前运行发布包 `metadata.json.version`，机器人版本取 RunPlan 或 `LINGTU_ROBOT` 中的型号，机器人 ID 读取设备端 `DOSO_DEVICE_ID`。缺失项返回 `None`；非空 ID 不是规范 UUID v4 时，握手返回 `FAILED_PRECONDITION` 和 `invalid_robot_id`。具体来源与统一发布规则见[机器人信息与固件发布](release.md)。
 
@@ -482,7 +482,7 @@ python scripts/test_generate_grpc.py
 
 ## 当前边界与验证
 
-站起/坐下请求、受控遥操作、任务状态快照流与类型化定位状态已接 SDK 和 Gateway，原生姿态链构建与本地合同测试通过，具体验证范围见推进记录。实机动作、BMS、足端、光照、独立于SLAM的机身速度/局部里程计等来源、综合健康与统一故障、单独控制权管理、断线恢复及统一巡检/跟随继续推进。地图内容接口读取已保存的 PCD，实时点云读取显示帧，相机提供 JPEG 流。现有 Brainstem C++ 客户端继续服务底层运动链路。
+站起/坐下请求、受控遥操作、任务状态快照流与类型化定位状态已接 SDK 和 Gateway，原生姿态链构建与本地合同测试通过，具体验证范围见推进记录。实机动作、电池电量/充电状态、光照、独立于SLAM的机身速度/局部里程计等来源、综合健康与统一故障、单独控制权管理、断线恢复及统一巡检/跟随继续推进。地图内容接口读取已保存的 PCD，实时点云读取显示帧，相机提供 JPEG 流。现有 Brainstem C++ 客户端继续服务底层运动链路。
 
 ```text
 cargo run -p doso-sdk --example read_status -- http://127.0.0.1:5052

@@ -1,12 +1,12 @@
 [package]
 name = "doso-sdk"
-version = "0.2.0-alpha.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.94"
-description = "DOSO robot SDK: explicit requests to the LingTu Gateway"
+description = "DOSO robot SDK for Brainstem and LingTu gRPC services"
 readme = "README.md"
 publish = false
-include = ["src/**", "proto/**", "examples/**", "tests/**", "docs/**", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "TESTING.md"]
+include = ["src/**", "proto/**", "brainstem/protocol/**", "examples/**", "tests/**", "docs/**", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "TESTING.md"]
 
 [dependencies]
 getrandom = "0.3"

@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 固定窗口测量实际接收频率
 
-运行只读示例 [`measure_observations`](../../examples/measure_observations.rs)，参数为 `<Gateway endpoint> [seconds=10] [both|imu|joints]`。显式指定 **Gateway gRPC 地址**，可选测量秒数接受1–3600的整数；第三个参数选择实际订阅的流，默认 `both` 保持原用法兼容，`imu`只订阅IMU，`joints`只订阅关节。指定模式时需同时填写秒数：
+运行只读示例 [`read_observations`](../../examples/read_observations.rs) 可先读取一次电机母线电压，再订阅 IMU 和关节流。频率与长窗口统计使用 [`measure_observations`](../../examples/measure_observations.rs)，参数为 `<Gateway endpoint> [seconds=10] [both|imu|joints]`。显式指定 **Gateway gRPC 地址**，可选测量秒数接受1–3600的整数；第三个参数选择实际订阅的流，默认 `both` 保持原用法兼容，`imu`只订阅IMU，`joints`只订阅关节。指定模式时需同时填写秒数：
 
 ```powershell
 cargo run --example measure_observations -- http://127.0.0.1:5052 10
@@ -282,7 +282,7 @@ pub async fn motor_voltages(&self) -> Result<rpc::MotorVoltagesResponse>
 
 无额外参数。调用 `Observations.MotorVoltages`，读取 Brainstem `GetVoltage`。返回 `volts: Vec<f64>`，单位 V，当前要求 16 项并按关节索引排列。
 
-源服务发起只读 CAN 电压查询，默认等待 500ms，未响应轴以 0 表示。响应没有逐轴有效位，调用方应保留 0 的这一来源语义。它提供电机母线电压，电池电量与 BMS 仍需独立来源。源未配置、上游失败或长度不为 16 时返回错误，频繁调用会增加 CAN 参数查询流量。
+V1 电源电压通过本接口提供，来源为电机母线测量。源服务发起只读 CAN 电压查询，默认等待 500ms，未响应轴以 0 表示。响应没有逐轴有效位，调用方应保留 0 的这一来源语义。源未配置、上游失败或长度不为 16 时返回错误，频繁调用会增加 CAN 参数查询流量。电池百分比与充电状态按各自实际来源开放。
 
 ```rust,no_run
 use doso_sdk::DosoClient;
@@ -372,6 +372,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 当前来源边界
 
-BMS、电池电量、足端和光照消息的定义见[消息清单](../message-catalog.md)，接收接口按真实数据源逐项开放。本文列出的接口需要目标设备部署相应服务，具体频率、时钟、关节映射及相机/点云表现仍需对应型号现场验收。
+电源电压和光照等消息的定义见[消息清单](../message-catalog.md)，接收接口按真实数据源逐项开放。本文列出的接口需要目标设备部署相应服务，具体频率、时钟、关节映射及相机/点云表现仍需对应型号现场验收。
 
 [返回 API 索引](README.md)

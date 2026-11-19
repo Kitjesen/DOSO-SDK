@@ -4,10 +4,10 @@ SDK 对外提供查询和订阅，数据由现有机器人端服务产生。下�
 
 | 数据 | 当前 SDK | 机器人端来源 | 后续工作 |
 | --- | --- | --- | --- |
-| IMU | `observations().watch_imu()` 流 | Brainstem `ListenImu` | 端到端实机频率和稳定性 |
-| 关节位置、速度、力矩 | `observations().watch_joints()` 流 | Brainstem `ListenJoint` | 实机持续性及各型号索引对应 |
+| IMU | `BrainstemClient::listen_imu()` 流 | Brainstem `ListenImu` | 真机 900 秒平均约99.993Hz，但最大空窗约23.5秒，长稳未通过 |
+| 关节位置、速度、力矩 | `BrainstemClient::listen_joint()` 流 | Brainstem `ListenJoint` | 真机 900 秒各轴平均99.918–99.940Hz，但最大空窗约18.6秒，长稳未通过 |
 | 电机在线、温度、状态及故障码 | `observations().motors()` 单次查询 | Brainstem `GetMotorStatus` | 源增加报告有效性信息；离线默认值不能证明健康 |
-| 电机母线电压 | `observations().motor_voltages()` 单次查询 | Brainstem `GetVoltage` | 源增加响应有效性；0 V 也可能表示未响应 |
+| 电机母线电压 | `BrainstemClient::voltage()` 单次查询 | Brainstem `GetVoltage` | 真机静态16轴读取通过；与实时流并发查询曾超时，周期稳定性待修复后重测 |
 | 系统、就绪与健康 | `system()` 多项查询 | Gateway、ProductControl 等 | 按真实产品完善字段和设备验收 |
 | 身体状态 | `motion().body_state()` 查询、`watch_body_state()` 事件流 | Brainstem 身体状态机 | 实机验证状态转换 |
 | 地图位姿和定位状态 | `localization().pose()`、`status()` 单次查询 | LingTu 定位与 SLAM | 位姿订阅及设备验收 |
@@ -17,9 +17,8 @@ SDK 对外提供查询和订阅，数据由现有机器人端服务产生。下�
 | 保存地图的点云 | `maps().point_cloud()` 分块读取 PCD | mapd 保存的地图文件 | 实机文件与传输验收 |
 | 实时点云 | `observations().watch_point_cloud()` 地图或扫描显示帧 | LingTu CloudViewerService | 实机频率、时延与 App 显示验收 |
 | 电池电量、充电状态 | 暂无 SDK 接口 | 尚未找到可确认的实机 BMS 数据源 | 确认设备数据来源后接入 |
-| 足端接触或足力 | 暂无 SDK 接口 | 来源和设备支持待确认 | 确认真实来源后接入 |
 
-电机诊断没有提供源数据采样时间或报告有效位。电压查询会触发底层 CAN 参数读取；它不是持续订阅，也不是电池电量。
+电机诊断没有提供源数据采样时间或报告有效位。电压查询通过 CAN 按需读取各电机母线电压。电池电量和充电状态需由独立数据源提供。
 
 ## 对照官方 SDK
 

@@ -1,6 +1,6 @@
 # DOSO Rust SDK API 手册
 
-适用于当前 `doso-sdk 0.2.0-alpha.1`。开发者通过一个 `DosoClient` 连接机器人，使用七个领域完成系统查询、运动操控、定位、地图、导航、观测和高层任务。
+适用于 `doso-sdk 0.2.0`。本地控制和观测使用 `BrainstemClient` 直连 `13145`。`DosoClient` 连接可选的 LingTu Gateway，提供七域接口。
 
 文档核对日期为2026-11-07；2026-11-11 补充地理位置查询与订阅，2026-11-12 收紧公开系统信息并将 `product_status()` 改为类型化结果。线协议方法不变，开发预览调用方需更新返回字段读取。其他接口沿用各自验证记录。
 
@@ -10,6 +10,7 @@
 
 | API文档 | 开发者可以完成的操作 | RPC定义 | Rust实现 |
 | --- | --- | --- | --- |
+| [BrainstemClient](brainstem.md) | 直接连接 `13145`，读取状态和观测，执行本地运动控制与 External 会话 | [cms.proto](../../brainstem/protocol/brainstem_api/cms.proto) | [brainstem/](../../src/brainstem/mod.rs) |
 | [连接与公共约定](client.md) | 配置地址与凭据、握手/显式重连、访问领域、请求身份与连接资源 | 握手使用[system.proto](../../proto/system.proto) | [client/](../../src/client/mod.rs) |
 | [system](system.md) | 读取身份、能力、健康、故障、就绪、会话和运行模式 | [system.proto](../../proto/system.proto) | [system/](../../src/system/mod.rs) |
 | [motion](motion.md) | 控制权、电机、Profile、外部运控、站坐、速度控制、停止与恢复 | [motion.proto](../../proto/motion.proto) | [motion/](../../src/motion/mod.rs) |
@@ -19,7 +20,7 @@
 | [observations](observations.md) | IMU、关节、电机、相机/内参、实时点云及场景 | [observations.proto](../../proto/observations.proto) | [observations/](../../src/observations/mod.rs) |
 | [tasks](tasks.md) | 高层指令、当前Run；巡检路线、任务与报告 | [tasks.proto](../../proto/tasks.proto) | [tasks/](../../src/tasks/mod.rs) |
 
-构建、Cargo 接入和运行示例见快速入门。返回码和消息字段使用独立的公共说明，领域页面补充各接口的具体语义。[快速入门](../usage.md) · [返回码与状态](../results.md) · [消息格式](../message-catalog.md)
+构建、Cargo 接入和运行示例见快速入门。Brainstem 直连的控制与观测方法见[直接接入说明](../direct-brainstem.md)。返回码和消息字段使用独立的公共说明，领域页面补充各接口的具体语义。[快速入门](../usage.md) · [返回码与状态](../results.md) · [消息格式](../message-catalog.md)
 
 API文档说明怎么调用，`proto/*.proto`定义网络RPC，`proto/messages/`定义消息字段，`src/`实现Rust调用行为。[build.rs](../../build.rs)从协议生成消息与客户端，[lib.rs](../../src/lib.rs)负责公共导出。生成代码不单独维护。机器人端的职责、进程及跨仓库代码位置见[架构说明](../architecture.md#外部运控的代码对应)。
 

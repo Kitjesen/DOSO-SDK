@@ -110,7 +110,19 @@ pub async fn location(&self) -> Result<rpc::GeographicLocation>
 
 调用 `Localization.Location`，读取已有 GNSS 进程的快照，不打开接收器，不启用云上传。地理位置采用 WGS84 经纬度，与 `pose()` 的 map 坐标分别表示。
 
-`state` 为 `GeographicState`：Unknown、Ready、Unavailable、NoFix、Stale 或 Invalid。仅 Ready 携带 `fix`，字段为 `latitude`、`longitude`（度）、`fix_type`（原 NMEA 代码 1–8）、`observed_at`（GNSS 源 UTC 时间）及可选 `accuracy_m`（实际已知的水平精度，米）。精度未知时保持缺失，不从 HDOP 猜测米数。`age_s` 为读取时的源时间年龄，无法计算时缺失。
+`state` 为 `GeographicState`，取值包括 Unknown、Ready、Unavailable、NoFix、Stale 和 Invalid。`GeographicLocation`、`GeographicFix`、`GeographicState` 均由 `doso_sdk` 直接导出。
+
+| 字段 | 类型与单位 | 含义 |
+| --- | --- | --- |
+| `state` | `GeographicState` | 定位可用性 |
+| `fix` | 可选 `GeographicFix` | Ready 时的位置 |
+| `age_s` | 可选浮点数，秒 | 读取时的源时间年龄 |
+| `fix.latitude`、`fix.longitude` | 浮点数，度 | WGS84 纬度和经度 |
+| `fix.fix_type` | 无符号整数 | 原始 NMEA fix 代码 1–8 |
+| `fix.observed_at` | UTC `Timestamp` | 当前驱动接收该 fix 时记录的源时间 |
+| `fix.accuracy_m` | 可选浮点数，米 | 实测水平精度，未知时缺失 |
+
+只有 Ready 携带 `fix`。精度保持接收机实际提供的米数，未知精度保持缺失。`age_s` 在无法计算时缺失。
 
 机器人端复用已有地理位置读取规则：默认读取 `/dev/shm/lingtu/gnss_status.json`，超过 3 秒为 Stale，未来超过 1 秒或无效文件为 Invalid，无有效定位为 NoFix。上述情况返回明确状态且不带旧坐标；文件不存在为 Unavailable。RPC 传输、鉴权或旧服务不支持的错误按原 gRPC 错误返回。
 
@@ -121,6 +133,14 @@ pub async fn watch_location(&self) -> Result<tonic::Streaming<rpc::GeographicLoc
 ```
 
 调用 `Localization.WatchLocation`，每秒读取一次已有 GNSS 快照，持续发送位置及失效、恢复状态；这是订阅快照频率，不提高接收器采样率。重复快照允许，`observed_at` 始终保留源时间。无定位不会结束流；取消、连接错误及共享订阅名额沿用公共规则。此流同样不启用任何云功能。
+
+仓库中的 `watch_location` 示例连接后先单次读取，再订阅 1Hz 流，输出状态、经纬度、原始源时间、定位类型、可选精度和数据年龄。在 SDK 根目录执行以下命令，将地址换为机器狗运行 LingTu gRPC 的实际地址。配置了 API key 的服务从 `DOSO_API_KEY` 环境变量读取凭据。
+
+```powershell
+cargo run --example watch_location --locked -- http://192.168.1.100:5052
+```
+
+`Ready` 返回有效 `fix`。`NoFix`、`Stale`、`Unavailable` 或 `Invalid` 返回对应状态并省略坐标，流会继续等待恢复。按 Ctrl+C 结束示例。这里读取本地 SDK 服务，云端上报由机器狗上的 `doso-cloud-link` 根据已授权的状态许可执行。
 
 ```rust,no_run
 use doso_sdk::DosoClient;

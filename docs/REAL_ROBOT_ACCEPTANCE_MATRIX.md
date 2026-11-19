@@ -21,7 +21,7 @@
 | SDK 分支 | `rust` |
 | 目标设备 | 研发机 `THUNDER-DEV-001` |
 | 设备 UUID | `d82a831a-2e86-4b46-975b-3d42473583b7` |
-| Gateway | 现场正式 `5052` 地址，使用真实 API key 和 TLS CA |
+| Brainstem | `192.168.66.64:13145`，使用 Rust `BrainstemClient` 直连 |
 | 证据目录 | `D:\DOSO\artifacts\robot-cloud\sdk-real-acceptance-YYYYMMDD` |
 | 云端权限 | 只读状态与授权主题，禁止运动、遥操作、电机和通用 gRPC 透传 |
 
@@ -38,17 +38,17 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 目标 | 证明 SDK 能通过正式 Gateway 完成握手、认证和系统信息读取 |
-| SDK 入口 | `DosoClient::connect` 或 `DosoClient::with_config`、`system().info()`、`health()`、`readiness()`、`faults()`、`session()` |
-| 执行 | 使用正式 `5052` 地址连接，完成握手后读取身份、健康、就绪、故障和会话。重复连接一次，确认新连接能刷新会话信息。 |
-| 通过标准 | TLS 主机名和 CA 校验通过，API key 只发送一次且认证成功，UUID 与现场登记一致，系统信息字段来源明确，未知字段保持未知，健康/就绪查询不取得运动控制权。 |
+| 目标 | 证明 SDK 能通过 Brainstem 主 gRPC 服务读取底层状态和型号能力 |
+| SDK 入口 | `BrainstemClient::connect`、`control_status()`、`profile()`、`voltage()`、`motor_status()` |
+| 执行 | 使用 `13145` 直连，读取控制状态、Profile、电压和电机状态。记录身体状态、输出门、控制方、租约、故障、Profile 名称、16 路电压和 16 路电机在线状态。 |
+| 通过标准 | 连接建立成功，身体状态字段存在，输出门和控制权状态可读，Profile 非空，电压和电机数组均为 16 项，读取过程不申请控制权。 |
 | 失败处理 | 认证、TLS、协议版本或身份不一致时停止，不进入运动门。 |
 | 证据 | `01-system-connect.json`、`01-system-connect.log`、版本与证书摘要。 |
 
 建议命令：
 
 ```text
-cargo run --example read_status -- https://<gateway>:5052
+cargo run --example read_brainstem -- http://<robot>:13145
 ```
 
 ## 2. Motion 的站起、坐下、停止和电机状态
@@ -63,23 +63,23 @@ cargo run --example read_status -- https://<gateway>:5052
 | 失败处理 | 回执未知、状态不变化、停止未确认、控制 owner 异常或电机故障时立即停止后续运动门，保留现场状态。 |
 | 证据 | `02-motion-posture-stop.json`、`02-motion-posture-stop.log`、身体状态流和电机状态快照。 |
 
-## 3. IMU、关节 100Hz 和 Odometry 10Hz
+## 3. IMU、关节 100Hz、状态查询和电压
 
 | 项目 | 内容 |
 | --- | --- |
-| 目标 | 证明观测流的实际频率、连续性、索引和源时间 |
-| SDK 入口 | `observations().watch_imu()`、`watch_joints()`、`motion().watch_odometry()` |
+| 目标 | 证明 Brainstem 观测流和基础状态查询的实际连续性、索引、源时间和返回完整性 |
+| SDK 入口 | `BrainstemClient::listen_imu()`、`listen_joint()`、`control_status()`、`profile()`、`voltage()`、`motor_status()` |
 | IMU/关节窗口 | 连续 900 秒，同时消费 IMU 和全部关节轴。记录接收时间、源时间、序号、每轴样本数、间隔和错误。 |
-| Odometry 窗口 | 连续 600 秒，目标 10Hz。记录 parent/child frame、位姿、速度、源时间和接收间隔。 |
-| 建议通过阈值 | IMU 平均频率 `98–102Hz`。每个关节轴平均频率 `98–102Hz`。单次空窗不超过 2 秒。单轴最大接收间隔建议不超过 200ms。Odometry 平均频率 `9.5–10.5Hz`，空窗不超过 3 秒。 |
+| 状态查询窗口 | 与 IMU/关节流并行，每 10 秒读取一次 control status、Profile、电压和电机状态。记录查询耗时、错误、数组长度、零电压数量和在线电机最小值。 |
+| 建议通过阈值 | IMU 平均频率 `98–102Hz`。每个关节轴平均频率 `98–102Hz`。单次空窗不超过 2 秒。单轴最大接收间隔建议不超过 200ms。状态查询每个周期均成功，控制状态、Profile、电压和电机数组完整。电压零值和在线电机数量全部记录。 |
 | 通过标准 | 所有轴都持续有样本，频率和间隔满足阈值，源错误按真实错误交付，取消流后连接资源释放。SDK 不把缓存重复当成新采样。 |
 | 失败处理 | 任一流停流、轴缺失、源时间倒退或错误被吞掉时停止长稳结论，记录失败窗口和最后一条有效样本。 |
-| 证据 | `03-observations-900s.json`、`03-odometry-600s.json`、原始日志和频率统计。 |
+| 证据 | `03-brainstem-observations-900s.log`、查询摘要、原始日志和频率统计。 |
 
 建议命令：
 
 ```text
-cargo run --example measure_observations -- https://<gateway>:5052 900 both
+cargo run --example measure_brainstem -- http://<robot>:13145 900 10
 ```
 
 ## 4. Localization 和地图状态
@@ -144,7 +144,7 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 | --- | --- | --- | --- | --- | --- |
 | 1 System | `NOT RUN` |  |  |  |  |
 | 2 Motion | `NOT RUN` |  |  |  |  |
-| 3 Observations | `NOT RUN` |  |  |  |  |
+| 3 Observations | `FAIL`（BrainstemClient 直连 13145。900 秒纯流平均频率接近100Hz，但 IMU 最大空窗约23.5秒、关节最大空窗约18.6秒；并发查询探针还出现约3.1秒空窗） | 2026-11-18 | SDK 工作区当前改动 | `D:\DOSO\artifacts\robot-cloud\sdk-direct-brainstem-20261118` | 需要先处理 Brainstem 流调度/停流问题 |
 | 4 Localization/Maps | `NOT RUN` |  |  |  |  |
 | 5 Point cloud/Camera/Video | `FAIL`（relay 预热后相机临时桥通过；正式 5052、点云、App、公网未通过，冷启动不稳定） | 2026-11-15 | SDK 2bf587b | `D:\DOSO\artifacts\robot-cloud\real-connect-20261113` | 见相机窗口记录 |
 | 6 Navigation | `NOT RUN` |  |  |  |  |
@@ -152,7 +152,7 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 
 ## 现阶段状态
 
-SDK 本地合同回归为 124 项通过。正式机器人 5052 服务、Brainstem 部署、真实传感器频率、动作、导航到点、External 硬件接管和关闭回退仍需按本矩阵现场执行。相机消息合同已通过真实 go2rtc relay 的临时桥隔离验收，但需要预热且正式 5052 未部署，Gate 5 仍为 `FAIL`；观测门已有一次真实长稳失败记录，其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
+SDK 本地合同回归为 124 项通过。当前 Brainstem 直连观测门已经执行并记为 `FAIL`，原因是 900 秒窗口存在超过 2 秒的长时间空窗，平均频率不能替代连续性。正式机器人 5052 服务不属于当前直接路径。动作、导航到点、External 硬件接管和关闭回退仍需按本矩阵现场执行。相机消息合同已通过真实 go2rtc relay 的临时桥隔离验收，但需要预热，Gate 5 仍为 `FAIL`；其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
 
 ## 2026-11-14 现场窗口记录
 

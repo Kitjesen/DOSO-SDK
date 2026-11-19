@@ -1,9 +1,22 @@
 use super::{Config, DosoClient, ErrorKind, Service};
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use doso_sdk::{brainstem::rpc::Voltage, BrainstemClient, BrainstemConfig};
+use std::{
+    convert::Infallible,
+    fs,
+    future::{ready, Ready},
+    path::PathBuf,
+    process::Command,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::body::Body;
+use tonic::codegen::{http, BoxFuture, Service as HttpService};
+use tonic::server::{Grpc, NamedService, UnaryService};
+use tonic::transport::{Certificate, ClientTlsConfig, Identity, Server, ServerTlsConfig};
+use tonic::{Request, Response, Status};
 
 struct Certificates(PathBuf);
 
@@ -82,18 +95,63 @@ impl Certificates {
                 "server.pem",
             ],
         ] {
-            let result = Command::new("openssl")
-                .args(arguments)
-                .current_dir(&certificates.0)
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "test certificate generation failed: {}",
-                String::from_utf8_lossy(&result.stderr)
-            );
+            certificates.openssl(&arguments);
         }
         Some(certificates)
+    }
+
+    fn openssl(&self, arguments: &[&str]) {
+        let result = Command::new("openssl")
+            .args(arguments)
+            .current_dir(&self.0)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "test certificate generation failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    fn client_identity(&self) -> Identity {
+        fs::write(
+            self.0.join("client.ext"),
+            "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n",
+        )
+        .unwrap();
+        self.openssl(&[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-config",
+            "openssl.cnf",
+            "-subj",
+            "/CN=DOSO SDK Test Client",
+            "-keyout",
+            "client.key",
+            "-out",
+            "client.csr",
+        ]);
+        self.openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            "client.csr",
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            "client.ext",
+            "-out",
+            "client.pem",
+        ]);
+        Identity::from_pem(self.read("client.pem"), self.read("client.key"))
     }
 
     fn read(&self, filename: &str) -> Vec<u8> {
@@ -160,4 +218,96 @@ async fn ca_configuration_requires_https_and_nonempty_certificate() {
         let error = DosoClient::with_config(config).await.err().unwrap();
         assert_eq!(error.kind, ErrorKind::InvalidInput);
     }
+}
+
+#[derive(Clone)]
+struct BrainstemVoltage;
+
+impl NamedService for BrainstemVoltage {
+    const NAME: &'static str = "brainstem.api.v1.RobotControl";
+}
+
+impl UnaryService<()> for BrainstemVoltage {
+    type Response = Voltage;
+    type Future = Ready<Result<Response<Voltage>, Status>>;
+
+    fn call(&mut self, _: Request<()>) -> Self::Future {
+        ready(Ok(Response::new(Voltage { values: vec![52.5] })))
+    }
+}
+
+impl HttpService<http::Request<Body>> for BrainstemVoltage {
+    type Response = http::Response<Body>;
+    type Error = Infallible;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        Box::pin(async move {
+            if request.uri().path() != "/brainstem.api.v1.RobotControl/GetVoltage" {
+                return Ok(Status::unimplemented("fixture serves GetVoltage only").into_http());
+            }
+            Ok(Grpc::new(tonic_prost::ProstCodec::default())
+                .unary(Self, request)
+                .await)
+        })
+    }
+}
+
+#[tokio::test]
+async fn brainstem_mtls_requires_client_identity_and_matching_hostname() {
+    let Some(certificates) = Certificates::generate() else {
+        return;
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ca = Certificate::from_pem(certificates.read("ca.pem"));
+    let identity = Identity::from_pem(
+        certificates.read("server.pem"),
+        certificates.read("server.key"),
+    );
+    let (shutdown, receive_shutdown) = oneshot::channel();
+    let server = Server::builder()
+        .tls_config(
+            ServerTlsConfig::new()
+                .identity(identity)
+                .client_ca_root(ca.clone()),
+        )
+        .unwrap()
+        .add_service(BrainstemVoltage);
+    let serving = tokio::spawn(async move {
+        server
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                let _ = receive_shutdown.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    async fn read(endpoint: String, tls: ClientTlsConfig) -> doso_sdk::Result<Voltage> {
+        let mut config = BrainstemConfig::new(endpoint).with_tls(tls);
+        config.timeout = Duration::from_secs(3);
+        BrainstemClient::with_config(config).await?.voltage().await
+    }
+
+    let local = format!("https://localhost:{port}");
+    let trusted = ClientTlsConfig::new().ca_certificate(ca);
+    let authenticated = trusted.clone().identity(certificates.client_identity());
+    assert_eq!(
+        read(local.clone(), authenticated.clone())
+            .await
+            .unwrap()
+            .values,
+        [52.5]
+    );
+    assert!(read(local, trusted).await.is_err());
+    assert!(read(format!("https://127.0.0.1:{port}"), authenticated)
+        .await
+        .is_err());
+
+    shutdown.send(()).unwrap();
+    serving.await.unwrap();
 }

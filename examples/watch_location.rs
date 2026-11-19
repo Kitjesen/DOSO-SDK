@@ -13,6 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::new(&arguments[0]);
     config.api_key = std::env::var("DOSO_API_KEY").ok();
     let robot = DosoClient::with_config(config).await?;
+    eprintln!("snapshot={:?}", robot.localization().location().await?);
     let mut locations = robot.localization().watch_location().await?;
     while let Some(location) = locations.message().await? {
         println!(

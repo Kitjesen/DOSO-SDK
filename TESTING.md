@@ -1,6 +1,70 @@
 # SDK 测试记录
 
-更新：2026-11-15。功能和缺口集中在[逐板块清单](docs/features.md)，本页记录测试范围、结果和复现方法。API 文档与消息目录不各自维护一份测试总数。七域真机验收按[七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)执行。
+更新：2026-11-19。功能见[逐板块清单](docs/features.md)，现场检查见[七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)。
+
+## 2026-11-19 · 0.2.0
+
+- Brainstem 直连支持 mTLS，连接错误保留底层原因。观测验收分别记录 IMU 和每轴的接收空窗与机端消息时间戳间隔。
+- 真机 `13145` 未监听。机端日志确认 `can0` 实际 USB `1-2.1`、`can1` 实际 USB `1-1.1`，与启动预检要求相反。CAN 预检失败，`brainstem.service` 启动被依赖阻断。真机 mTLS 与 15 分钟长稳复验待恢复机端 CAN 映射后执行。
+
+## 2026-11-18 跨项目能力同步
+
+复核 App 与 robot-cloud 最近的控制接入后，SDK 公开 API 不需要新增重复方法。当前本地 SDK 直接使用 `BrainstemClient → 13145` 做控制与诊断，不要求部署 `5052`。robot-cloud 的用户授权会话仍只读，不能获得 `13145` 的通用 gRPC 控制隧道；External 逐关节控制继续是本地 SDK 能力。七域 `DosoClient → 5052` 仅作为未来 LingTu 高层服务入口保留。
+
+本轮 `BrainstemClient` 已完成协议生成、连接配置、查询、IMU/关节流、租约、站坐、速度、Profile、电机门和 External 客户端。`cargo test --locked --offline -j 1` 通过 12 个单元测试、103 个 gRPC 合同测试、2 个消息格式测试和 11 个文档测试；`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、格式和差异检查通过。上述结果只证明 Rust 客户端和协议映射，尚未发送真机运动命令，也不表示 External 或 Recovery 已在当前制品启用。
+
+### 2026-11-18 视频链路复核
+
+当前开机机器 `192.168.66.64` 的只读视频检查通过。`5050/api/v1/camera/status` 返回 `200`、`available=true`、`status=streaming`、`backend=orbbec_native`，彩色和深度帧计数持续存在。`5050/api/v1/webrtc/status` 返回 `200`、`available=true`、`backend=go2rtc`、流名 `cam`。`5050/api/v1/camera/snapshot` 返回 `200 image/jpeg`，本次快照为 28,729 字节。结构化证据见 [camera-current-readonly-20261118.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-current-readonly-20261118.json)。
+
+历史 WebRTC/WHEP 真机验收已记录为连接成功，画面 `640×480`、首帧约 6.2 秒、解码帧持续增长、丢包为 0，见 [real-webrtc-acceptance-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json)。本次复核读取状态和 JPEG 快照，没有重新启动 WebRTC 解码器。视频产品名使用 `DOSO Video Gateway`，内部组件继续保留 `go2rtc` 名称。
+
+本轮检查确认 robot-cloud 当前新增的是 Claim、Hold、Release 的会话闭环，真实速度载荷、ARM64 安装、线上 Gateway 和真机持权仍待验收。LingTu 最近导航/follow 工作没有新增 DOSO SDK protobuf 或公开方法，因此没有复制新的协议文件。
+
+## 2026-11-18 Brainstem 直连客户端收口
+
+`BrainstemClient` 现在是本地运动和实时观测的主入口：状态、Profile、电压、电机诊断、IMU/关节流，以及电机门、控制权租约、站起、坐下、速度命令、Profile/速度模式、故障清除和清零均调用原生 `brainstem.api.v1`。`BrainstemExternalClient` 使用同一 `13145` channel 提供 External 会话和逐关节双向流；没有新增端口，也不打开 CAN 或串口。
+
+本地验证：`cargo fmt --check`、`cargo check --locked`、`cargo test --locked` 通过（12 个单元、103 个 gRPC 合同、2 个消息格式、11 个 doctest）。这些测试只证明 Rust 客户端编译、参数校验、协议调用和已有本地服务合同；本轮没有向真机发送运动或 External 帧。真机动作和 External 输出仍按验收矩阵单独执行。
+
+### 直连真机只读复核
+
+2026-11-18 04:28 CST 使用 `cargo run --locked --offline --example read_brainstem -- http://192.168.66.64:13145` 通过新 Rust 客户端完成一次只读复核。`ControlStatus` 返回 `Grounded`、电机输出关闭、控制方 `None`、无严重故障、无租约，`GetProfile` 返回当前 Profile 和 2 个可用 Profile，`GetVoltage` 返回 16 个非零值，`GetMotorStatus` 返回 16/16 online。该命令没有申请租约、使能电机或发送运动命令。
+
+随后用临时只读验证程序调用同一客户端的 `listen_imu()` 与 `listen_joint()`。真机在 3 秒窗口内返回 IMU 首帧和 16 个关节事件，IMU 保留角速度、四元数和源时间，加速度字段按服务端实际值保持缺失。临时程序已删除，没有成为 SDK 对外接口。
+
+新增 `examples/measure_brainstem.rs` 作为完整只读长稳入口。默认 900 秒同时消费 IMU/关节流，并每 10 秒读取 `control_status`、`profile`、`voltage` 和 `motor_status`。测试在正式窗口完成前遇到失败会停止，不发送任何控制命令。2026-11-18 的首轮 900 秒窗口在开始阶段连续出现状态查询超时，已手动停止并保留日志 `D:\DOSO\artifacts\robot-cloud\sdk-direct-brainstem-20261118\measure-900s.log`。
+
+随后执行 10 秒双连接探针，状态查询全部成功，IMU 和关节各轴约 50.5 Hz，最大接收空窗约 3.1 秒，长稳验收失败。该记录没有逐帧机端时间差，停顿位置待定位。证据为 `D:\DOSO\artifacts\robot-cloud\sdk-direct-brainstem-20261118\measure-10s-two-channels.log`。
+
+为隔离传感器流本身，修正版程序执行了 900 秒纯流窗口，查询间隔设为 `0`。窗口完整运行 900.012 秒，IMU 收到 89,995 条，平均 99.993Hz；16 个关节轴平均 99.918–99.940Hz，所有轴均有样本，源时间跨度约 899.9 秒。最大接收空窗仍达到 IMU 23.538 秒、关节 18.620 秒，超过 2 秒阈值，因此 Gate 3 继续为 `FAIL`。证据为 `D:\DOSO\artifacts\robot-cloud\sdk-direct-brainstem-20261118\measure-stream-only-900s-fixed.log`。平均频率正常不能抵消长时间停流。
+
+## 2026-11-17 Brainstem 真机 gRPC 能力核对
+
+SSH 只读快照确认 `192.168.66.64:13145` 由运行中的 Brainstem 提供，正式 SDK `5052` 和本机状态 `13146` 未监听。随后通过 Brainstem 正式 protobuf 直连主端口读取数据。
+
+| 接口 | 本轮结果 |
+| --- | --- |
+| `GetStartTime`、`GetCmsState`、`GetControlStatus`、`GetProfile`、`GetParams` | 均返回 OK，身体状态 Grounded |
+| `GetMotorStatus` | 16轴均标记 online |
+| `GetVoltage` | 16个非零电压，49.651–50.995V，约509ms |
+| `ListenImu` | 5秒500帧，接收约99.843Hz；角速度、四元数、时间存在，加速度字段缺失 |
+| `ListenJoint` | 5秒7813个单关节事件，16轴各约97.675–97.784Hz |
+| `RobotRecovery.GetStatus`、`RobotExternalControl.GetStatus` | 均返回 UNIMPLEMENTED / Path not found |
+| `GetSpeedMode`、`ListGestures` | 均返回 UNIMPLEMENTED |
+
+输入为真实机器人数据。该检查覆盖 Brainstem 直接读取的短窗口，15 分钟长稳、运动动作、摔倒恢复和 External 输出仍待验收。七域 `5052` 不属于当前直接入口。V1 电源信息使用 Brainstem `voltage()` 读取电机母线电压。足接触已按用户要求移出 V1 待办。[原始 RPC 记录](D:/DOSO/artifacts/robot-cloud/grpc-capabilities-20261117/readonly-rpc.json)
+
+## 2026-11-17 GPS 接口与示例复核
+
+复用 `localization.location()`、`watch_location()` 和 `examples/watch_location.rs`。示例通过真实 `DosoClient` 连接，先单次查询，再接收 1Hz 地理位置流。接口和消息格式沿用现有定义，运行方式见[地理位置 API](docs/api/localization.md#地理位置)。
+
+- `cargo test --test grpc location:: --locked --offline -j 1` 通过 3 项，覆盖 WGS84、源时间、未知精度、过期状态、鉴权/旧服务错误和取消订阅。
+- `cargo check --example watch_location --locked --offline -j 1`、示例 `--help`、`cargo build --example watch_location --locked --offline -j 1`、格式与差异空白检查通过。
+- `read_observations` 示例现在先调用 `observations().motor_voltages()` 输出电机母线电压，再订阅 IMU 和关节流；`cargo check --locked --offline --example read_observations` 通过。
+- 复用 2026-11-11 的生产 Python Gateway → Rust 示例回环脚本，临时模拟快照依次返回 Ready、Ready、NoFix、Stale、Ready，约 4.11 秒完成 5 份样本。原始时间的 125000000ns、未知精度和恢复后的坐标保留，关闭测试服务后客户端退出，测试端口释放。新增单次查询通过同一生产 handler 返回 Ready，输出与持续流分别保留。
+
+本轮输入为临时模拟 GNSS 文件。该结果覆盖本机生产 handler 和真实 Rust 示例，真机接收器、机器狗部署及 GPS 云端入库需各自验收。[回环证据](D:/DOSO/artifacts/robot-cloud/location-20261117/sdk-example/cross-language.json)
 
 ## 验证层级
 
@@ -153,6 +217,6 @@ App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 sur
 
 - 本轮未运行完整仿真、真实地图导航、机器人动作、External策略、手机/Android实装或真实公网视频。
 - 没有运行全部 LingTu/native/Brainstem 仓库测试或重新构建整机固件；只检查本次受影响入口，避免触碰现场运行时。
-- BMS、足接触、光照、外设与充电桩缺真实适配器；姿态/步态、Recovery/阻尼缺完整执行链，详见[未完成能力](docs/features.md)。
+- 光照、外设与充电桩缺真实适配器；姿态/步态、Recovery/阻尼缺完整执行链，详见[未完成能力](docs/features.md)。电源电压使用现有电机母线接口。
 - 相机源内参的旋转畸变系数沿用原实现；标定数值、坐标轴及其与 JPEG 预览的几何对齐仍须实机验收。
 - 单关节 gRPC 统一索引已在当前 Brainstem 源码核对，现场 flowfix10 是否包含归一化尚未确认；不能把旧事件 ID 直接当 External 目标索引。

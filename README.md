@@ -1,28 +1,28 @@
 # DOSO SDK
 
-DOSO 整机 SDK 使用 **Rust + gRPC/Protobuf**，当前处于开发预览阶段。
-开发者通过一个 `DosoClient` 访问系统、运动、定位、地图、导航、观测和高层任务。
-SDK 面向机器人本地能力，不持有云管理凭据。设备不能管理云端归属、授权或规则；云端禁止远程运动控制，本地 SDK 操控继续通过机端控制权和安全链。
-连接完成协议握手后，通过 `system().info()` 取得固件版本、机器人版本和机器人 ID。健康与就绪状态单独查询。
+DOSO Rust SDK **0.2.0** 使用 **gRPC / Protobuf**。现场验收进度见 [TESTING.md](TESTING.md)。
+当前本地控制和观测使用 `BrainstemClient` 直接连接机器狗 `13145`，不要求部署独立 `5052` 服务。七域 `DosoClient` 保留 LingTu 地图、导航和任务等高层能力的协议合同。
+SDK 面向机器人本地能力，不持有云管理凭据。设备不能管理云端归属、授权或规则。运动 API 通过机器狗 Brainstem 的本地 gRPC 和机端控制权、安全链执行。云端只做设备登记、许可和只读状态同步，不发送运动命令，也不建立通用 gRPC 转发。
+直接 Brainstem 连接读取 `control_status()`、`profile()`、`voltage()` 和 `motor_status()`。只有使用可选的七域 `DosoClient` 时才会执行 `system().info()` 协议握手。
 
-连接实现位于 [client](src/client/mod.rs)，站坐、速度控制和停止位于 [motion](src/motion/mod.rs)，导航目标与任务控制位于 [navigation](src/navigation/mod.rs)。调用方式见[站起与坐下](docs/usage.md#站起与坐下)、[受控遥操作](docs/usage.md#受控遥操作)，与智身、宇树 Go2 的逐项差距见[连接与操控对照](docs/architecture.md#连接与操控对照)。
+直接 Brainstem 连接位于 [brainstem](src/brainstem/mod.rs)，控制状态、站坐、速度、External 逐关节接管和观测都沿用机器狗原生 gRPC 合同。七域连接实现位于 [client](src/client/mod.rs)，只用于可选的 LingTu 高层服务；与智身、宇树 Go2 的逐项差距见[连接与操控对照](docs/architecture.md#连接与操控对照)。
 
 巡检路线 CRUD、任务执行/查询/订阅/控制与报告复用现有机器人任务 owner，接口见[tasks](docs/api/tasks.md#巡检路线与任务)。
 
 客户自己的运控程序通过[外部运控模式](docs/api/motion.md#自定义控制器)持续提交逐关节目标；策略语言、推理框架和部署方式由客户选择。
 
-本地地理位置使用 `localization().location()` 和 `watch_location()`，WGS84 经纬度与 SLAM 地图位姿分别提供。1Hz 订阅保留 GNSS 源时间与可用状态，示例为 `cargo run --example watch_location -- http://<robot>:5052`。[地理位置 API](docs/api/localization.md#地理位置)
+高层地理位置使用 `localization().location()` 和 `watch_location()`，WGS84 经纬度与 SLAM 地图位姿分别提供，前提是已部署可选的 `5052` Gateway。直接 Brainstem 入口不包含 SLAM、地图或导航。[地理位置 API](docs/api/localization.md#地理位置)
 
 ```text
-应用 → Rust SDK → gRPC :5052 → LingTu 领域操作 → 现有机器人服务
+应用 → Rust SDK BrainstemClient → gRPC :13145 → Brainstem → CAN / 传感器 / 电机
 ```
 
 ## 开始使用
 
-需要 Rust 1.94+ 和 `protoc`。Rust 主线位于 `rust` 分支：
+需要 Rust 1.94+ 和 `protoc`。获取 `v0.2.0`：
 
 ```text
-git clone --branch rust --single-branch https://github.com/Kitjesen/DOSO-SDK.git
+git clone --branch v0.2.0 --single-branch https://github.com/Kitjesen/DOSO-SDK.git
 cd DOSO-SDK
 ```
 
@@ -30,10 +30,10 @@ cd DOSO-SDK
 
 ```text
 cargo build --locked
-cargo run --example read_status -- --help
+cargo run --example read_brainstem -- http://127.0.0.1:13145
 ```
 
-应用可通过 Cargo 的 Git 依赖引用 `rust` 分支，也可使用本地 path 依赖。安装与常用流程见[快速入门](docs/usage.md)，函数签名、参数、返回值和示例见[API手册](docs/api/README.md)。
+远程 Brainstem 使用 `https://` 与设备签发的客户端证书，配置见 [直连 API](docs/api/brainstem.md)。应用可通过 Cargo Git 或本地 path 依赖接入。[快速入门](docs/usage.md) · [API 手册](docs/api/README.md)
 
 导航提供地图目标及可选限速/到达半径、只读规划预览、运行中限速、任务状态/等待/控制与路线订阅。可运行的[导航到点示例](examples/navigate.rs)按一次目标关联同一个任务，使用前先查看 `cargo run --example navigate -- --help`。[导航 API](docs/api/navigation.md)说明当前公开能力与验收边界；规划与执行由机器人侧 LingTu 导航服务负责，正式机端服务部署和真实到点闭环仍待验收。
 
@@ -47,7 +47,7 @@ DOSO-SDK/
 ├── tests/           Rust gRPC 合同测试
 ├── scripts/         协议绑定生成工具
 ├── docs/            架构、使用说明、计划与验证记录
-├── brainstem/       仍在使用的 C++ 底层客户端
+├── brainstem/       Brainstem 协议、Rust 直连客户端与 C++ 底层客户端
 ├── archive/python/  历史 Python HTTP 预览
 ├── Cargo.toml       Rust 包入口
 └── CMakeLists.txt   C++ 下游兼容构建入口
@@ -68,11 +68,12 @@ Rust 是当前主线。Brainstem C++ 客户端保留独立的[构建与安装说
 - [机器人信息与固件发布](docs/release.md)
 - [V1 产品计划](docs/v1-plan.md)
 - [通信选择](docs/transport-selection.md)
+- [直接 Brainstem 接入](docs/direct-brainstem.md)
 - [gRPC 推进与验证记录](docs/grpc-v1-progress.md)
 
 `cargo test --locked` 运行客户端测试和使用说明中的示例编译检查。
 七域接口已接入本地 gRPC 服务，已提供站起/坐下请求、受控遥操作双向流、50Hz任务运行快照流、类型化定位状态，以及 IMU、关节、相机和点云订阅。姿态链原生构建与本地合同验证已通过，设备动作待现场验收，BMS、足端等真实数据源仍待接入。当前方法与来源边界见使用说明。
 
-gRPC 服务已支持 API key 鉴权和 TLS，客户端支持私有 CA。未配置凭据和证书时采用开发用明文 listener。已有测试证据、仿真与实机边界见推进记录，本库尚未正式发布。
+七域 Gateway 的 gRPC 服务支持 API key 鉴权和 TLS，客户端支持私有 CA。当前 `BrainstemClient` 只接受受控网络中的 `http://` 端点，尚未接入 TLS。已有测试证据、仿真与实机边界见推进记录，本库尚未正式发布。
 
 推进记录中以 `D:/` 开头的链接是开发机上的历史测试证据，不随本仓库分发；API、协议、示例和构建说明使用仓库内链接。

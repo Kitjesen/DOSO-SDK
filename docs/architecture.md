@@ -1,6 +1,6 @@
 # DOSO 整机 SDK 架构
 
-V1 主实现是异步 Rust SDK。七域通过 gRPC/Protobuf 连接 LingTu Gateway，复用现有领域操作与机器人端 owner。实现与验证范围见 [gRPC 推进记录](grpc-v1-progress.md)，产品阶段见 [V1 计划](v1-plan.md)。
+V1 主实现是异步 Rust SDK。本地运动与实时观测直接通过 `BrainstemClient` 连接机器狗 `13145`；地图、SLAM、导航和高层任务保留 `DosoClient` 的七域合同，只有在对应 LingTu owner 可用时才连接可选 Gateway。实现与验证范围见 [gRPC 推进记录](grpc-v1-progress.md)，产品阶段见 [V1 计划](v1-plan.md)。
 
 云端相关内容核对日期为2026-11-08。当前云端产品状态和下一阶段由 [robot-cloud推进记录](D:/DOSO/robot-cloud/PROGRESS.md) 维护，本页说明SDK与云端的职责和连接关系。
 
@@ -26,23 +26,17 @@ V1 主实现是异步 Rust SDK。七域通过 gRPC/Protobuf 连接 LingTu Gatewa
 
 ```mermaid
 flowchart TB
-    App[开发者程序 / App / 工具] --> Client
+    App[开发者程序 / App / 工具]
     subgraph SDK["DOSO Rust SDK（运行在调用方）"]
-        Client[DosoClient：连接、握手、错误与请求身份]
-        subgraph Domains[七个 SDK 领域]
-            S[system]
-            M[motion]
-            L[localization]
-            MapSDK[maps]
-            N[navigation]
-            O[observations]
-            T[tasks]
-        end
-        Client --> Domains
-        Domains --> Transport[gRPC 客户端与 Protobuf 消息]
+        Direct[BrainstemClient：本地控制与实时观测]
+        Gateway[DosoClient：可选七域高层合同]
     end
-    Transport <-->|"gRPC / Protobuf，默认 5052"| API
+    App --> Direct
+    App -.-> Gateway
+    Direct <-->|"原生 gRPC / Protobuf :13145"| BrainstemDirect
+    Gateway -.->|"可选高层 gRPC :5052"| API
     subgraph Robot["机器狗运行端"]
+        BrainstemDirect["Brainstem :13145\n本机只读 :13146"]
         API["DOSO 对外接口（LingTu GatewayModule）"]
         API --> Product[ProductControl：模式与生命周期]
         API --> Nav[navd：导航与运动仲裁]
@@ -57,9 +51,28 @@ flowchart TB
         Sensor --> Devices[IMU / 关节 / 相机 / 雷达等数据源]
         SLAM --> Devices
     end
+    Cloud[doso-cloud-link] -->|"只读 gRPC :13146"| BrainstemDirect
 ```
 
-`GatewayModule` 管理 gRPC server 的启动与关闭。七个 service 共用一个 server 和客户端 channel，不产生七个独立进程。gRPC handler 直接调用共享操作或现有 owner，导航任务账本、停止处理、指令执行等业务规则只维护一份；旧 Web 路由也调用这些操作。
+`BrainstemClient` 是本地控制和实时观测的主入口，直接调用 Brainstem 原生服务，不经过额外转发。`GatewayModule` 只在需要地图、SLAM、导航或高层任务时管理可选的 gRPC server；七个 service 共用一个 server 和客户端 channel，不产生七个独立进程。它不能复制硬件状态或创建第二个 CAN owner。
+
+### Brainstem 直连与可选 Gateway
+
+当前 V1 本地 SDK 直接连接 Brainstem `13145`，不要求安装或启动 `5052`。Brainstem Thunder 负责唯一的 CAN、IMU、关节、电机状态、运动仲裁和安全输出。`13146` 是同一 Brainstem 进程提供的回环只读入口，只注册 `GetControlStatus`，供云连接进程读取状态。
+
+```text
+外部程序 / DOSO Rust SDK BrainstemClient
+          ↓ gRPC :13145
+Brainstem
+          ↓
+CAN / IMU / 关节 / 电机
+
+doso-cloud-link → Brainstem :13146 → GetControlStatus（只读）
+```
+
+`5052` 仍保留 `doso.v1` 七域协议和对应 Rust `DosoClient`，作为未来接入 LingTu `ProductControl`、`navd`、SLAM、`mapd` 与感知 owner 的可选入口。它不是当前直连路径的前置服务，也不应复制 Brainstem 的 CAN、串口、IMU、关节或电机状态 owner。地图、导航和高层任务在直接 Brainstem 模式下明确不可用。
+
+部署时只允许一套 Brainstem 和一套硬件驱动持有 CAN、串口和电机输出。无论未来是否启用 5052，Gateway 都不能替代 Brainstem 生命周期或创建第二个硬件 owner。
 
 `client` 统一配置 API key metadata、HTTPS 信任根与私有 CA。机器人端 `gateway.rpc.security` 在业务处理前验证所有 RPC 的凭据，并负责读取 listener 的 TLS 配置。TLS 与 API key 分别启用，配置和接入示例由[使用说明](usage.md#api-key-与-tls)维护。
 
@@ -69,20 +82,24 @@ SDK 的远程入口已切换到 gRPC，ProductControl 的本机 HTTP 服务仍�
 
 ## 云端管理与本地接入
 
-2026-11-12 明确权限：设备凭据不授予云管理权；DOSO 云端禁止远程运动控制、任意 gRPC 透传与运控隧道。本地 SDK 继续经机端控制权与安全链完成运动和导航。云状态链固定读取 `GetControlStatus`，媒体观看使用独立许可。系统 gRPC 公开查询按业务字段投影，普通客户不获得平台映射、许可版本、投递队列和内部配置；协议必需的请求身份、坐标/时间和并发切换校验不作为客户设置展示。
+2026-11-18 权限边界保持分层：设备凭据不授予云管理权，云端不提供任意 gRPC 透传和远程运控。`robot-cloud` 只负责账号、设备归属、许可、连接历史和只读状态；机器狗上的 `doso-cloud-link` 通过 `13146` 读取 `GetControlStatus` 后上报。运动控制、External 策略和安全停止只能由本地 SDK 调用 `13145`，不会由云端桥接或 MQTT 转发。媒体观看使用独立许可。系统 gRPC 公开查询按业务字段投影，普通客户不获得平台映射、许可版本、投递队列和内部配置；协议必需的请求身份、坐标/时间和并发切换校验不作为客户设置展示。
 
 云端账号/设备后端管理设备归属、用户许可和最新状态，PostgreSQL保存业务数据。业务后端通过HTTPS与 `doso-cloud-gateway` 查询和同步状态；云网关经Mosquitto与机器狗上的 `doso-cloud-link` 使用MQTT 5/mTLS通信。机器狗云连接读取本机Brainstem `GetControlStatus`，来源为只读gRPC端口 `127.0.0.1:13146`。App、SDK与云端共用同一永久 `robot_id`（UUID v4）。云端工程源码位于 `D:\DOSO\robot-cloud`：`robot/`运行在机器狗，`cloud/`部署到服务器，`shared/`编译进两端，`tools/`供联调和部署使用；详情见 [robot-cloud架构](D:/DOSO/robot-cloud/ARCHITECTURE.md)。
 
-SDK公开gRPC端口 `:5052` 继续提供本地接入。当前云端接口覆盖设备管理与远程状态；External逐关节控制不经过云网关或MQTT转发。云端Gateway自动同步已有部署记录；2026-11-07已通过正常账号、已登记模拟设备、实际Web App与真实业务数据库的状态流程，设备源为模拟Brainstem，MQTT经SSH隧道，见 [模拟流程及证据](D:/DOSO/robot-cloud/docs/SIMULATED_FLOW.md)。真实机器狗、G20、独立公网MQTT/5G及完整断云仍待验收；可信本地开启和远程持久化断云尚有实现缺口。视频为独立候选链路，部署与验收由云端项目维护。
+本地直接控制使用 `BrainstemClient` 的 `13145` 连接。云端接口只覆盖设备管理和只读远程状态，不能获得 `13145` 的通用控制隧道。External 逐关节控制属于本地 SDK 能力，不由云端开放通用转发。`DosoClient` 的 `5052` 高层入口仅在未来 LingTu Gateway 部署时启用。视频是独立媒体链路，部署与验收由云端项目维护。
+
+视频产品名统一使用 `DOSO Video Gateway`。机器狗内部仍运行 `go2rtc` 组件，负责 WHEP/WebRTC 会话和 H.264 转发。当前 Rust `BrainstemClient` 不连接视频。App 通过 `5050/api/v1/webrtc/whep?src=cam` 接收 WebRTC，Rust `DosoClient` 的 JPEG 接口需要相机 Gateway owner 提供 `doso.v1` 相机 RPC。
 
 ## 代码组织与合同
 
 ```text
 DOSO-SDK/
 ├── proto/                 doso.v1 领域协议与共享类型
+├── brainstem/protocol/    brainstem.api.v1 原生协议快照
 ├── build.rs               生成 Rust 消息与客户端
 └── src/
     ├── lib.rs             模块声明与公共导出
+    ├── brainstem/mod.rs    13145 直连、运动与观测
     ├── client/mod.rs      连接、配置、元数据与回执处理
     ├── common/mod.rs      共享输入检查与请求身份
     ├── error/mod.rs       SDK 错误与 gRPC 状态转换
@@ -219,12 +236,12 @@ DOSO导航目标、任务暂停/恢复/取消由`navigation`维护，地图建�
 
 | 领域 | 已有 SDK 能力（代码层面） | 主要缺口 |
 | --- | --- | --- |
-| `system` | 身份、健康与就绪查询；类型化综合状态、就绪、已知故障与来源覆盖快照 | 更完整的整机健康覆盖待接入；电池/BMS真实来源待确认 |
+| `system` | 身份、健康与就绪查询；类型化综合状态、就绪、已知故障与来源覆盖快照 | 更完整的整机健康覆盖待接入；电池电量与充电状态来源待确认 |
 | `motion` | 站起/坐下、电机使能/失能、profile查询/切换、外部逐关节控制、停止、急停/复位、显式恢复、会话控制权管理、权限快照、身体状态与事件、底层控制查询、SLAM速度/里程计、受控遥操作 | 里程计与默认速度源约10Hz；完整权限事件、Product运行模式公共接线、姿态/步态后端与现场运动验收待推进 |
 | `localization` | 位姿查询与流、接收年龄/新鲜度、类型化定位状态、WGS84 地理位置查询/1Hz流、重定位 | GNSS 保留源时间及无 fix/过期状态；真实 GNSS 与实机定位链待验收 |
 | `maps` | 地图列表、保存/加载、PCD 读取、保存栅格读取 | 真实地图、存取和设备内存表现待验收；实时栅格未提供 SDK 接口 |
 | `navigation` | 目标、任务状态/暂停/恢复/取消、路线查询与流 | 真实导航闭环待验收；路线缓存高度的兼容默认值需明确来源 |
-| `observations` | IMU、关节、相机、实时预览点云流；电机查询 | 数据源时间、关节映射、相机元信息和频率实测待完善；足端、光照数据源待确认 |
+| `observations` | IMU、关节、相机、实时预览点云流；电机状态与母线电压查询 | 数据源时间、关节映射、相机元信息和频率实测待完善；光照数据源待确认 |
 | `tasks` | 指令/当前 Run，以及已有路线的巡检 CRUD、执行、50Hz任务流、控制和报告 | 统一跟随与 Agent 历史查询仍待完善；真实巡检未验收 |
 
 跨领域已接通 gRPC API key 鉴权与 TLS，默认未配置凭据或证书时采用开发用明文 listener。生产凭据、证书配置、断线恢复、SDK 版本兼容与实机端到端验证继续推进。运动、位姿和路线快照目标最高 100Hz，实际频率受源更新、处理与网络影响。导航和高层任务采用目标 50Hz 周期快照；遥操作发布与应答独立，输入绑定有效期固定为 350ms 的机器人窗口。

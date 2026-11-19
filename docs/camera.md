@@ -1,5 +1,32 @@
 # 相机图像和远程观看
 
+## 当前视频链路
+
+机器狗的图像链路使用 DOSO 对外的 **Video Gateway** 产品名。内部实现仍使用 `go2rtc` 作为视频会话和 H.264/WebRTC 转发组件。产品界面、SDK 状态和验收文档使用 `Video Gateway` 或 `DOSO Media Gateway`，部署配置和进程诊断保留 `go2rtc` 原名，避免改名后丢失上游配置和排障信息。
+
+```text
+Orbbec
+  ↓
+LingTu camera owner
+  ↓
+DOSO Video Gateway
+  ├── HTTP :5050 /api/v1/camera/status
+  ├── HTTP :5050 /api/v1/camera/snapshot
+  └── WHEP :5050/api/v1/webrtc/whep?src=cam
+       ↓
+    App WebRTC receiver
+```
+
+Brainstem `13145` 继续只负责运动、IMU、关节和电机数据。视频不经过 Brainstem。
+
+2026-11-18 的只读检查显示相机状态为 `streaming`，WHEP 状态列出 `cam`，JPEG 快照返回 `200 image/jpeg` 和 28,729 字节。[当前只读证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-current-readonly-20261118.json)
+
+历史 WebRTC 解码验收显示连接成功、画面 `640×480`、首帧约 6.2 秒、解码帧持续增长、丢包为 0。[WHEP 验收证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json)
+
+## SDK 与显示边界
+
+App 已经可以通过 WHEP 接收并显示视频。Rust SDK 的 `DosoClient` 已有 JPEG 快照和 JPEG 流接口，前提是机器狗部署提供 `doso.v1` 的相机服务。`BrainstemClient` 不包含相机接口，因为 `brainstem.api.v1` 没有图像和视频 RPC。Rust SDK 负责连接、授权和接收数据，画面显示由 App 的 WebRTC 播放器或图像组件完成。
+
 `observations().camera_frame(viewer_token)` 查询可取得的 JPEG 快照，`watch_camera(viewer_token)` 订阅 JPEG 帧。两者复用 LingTu 的相机快照和 JPEG relay。`CameraFrame.jpeg` 是完整 JPEG 字节，可交给图像解码器或写入 `.jpg` 文件。
 
 ```rust,no_run

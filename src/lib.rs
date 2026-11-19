@@ -1,5 +1,6 @@
 //! Typed, asynchronous gRPC client for DOSO robot services.
 #![doc = include_str!("../docs/usage.md")]
+pub mod brainstem;
 mod client;
 mod common;
 mod error;
@@ -15,6 +16,10 @@ pub mod rpc {
     tonic::include_proto!("doso.v1");
 }
 
+pub use brainstem::{
+    BrainstemClient, BrainstemConfig, BrainstemExternalClient,
+    DEFAULT_ENDPOINT as BRAINSTEM_DEFAULT_ENDPOINT,
+};
 pub use client::{Config, DosoClient};
 pub use common::new_request_id;
 pub use error::{Error, ErrorKind, Result, Terminal};

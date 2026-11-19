@@ -54,7 +54,6 @@
 | `CameraCalibration` | [observations.proto](../proto/messages/observations.proto) | 源彩色图尺寸、焦距、主点、坐标系及畸变 | `camera_calibration()` 已接已发布的相机内参；缺来源返回 UNAVAILABLE，不能直接视为旋转后 JPEG 的标定 |
 | `CameraInfo` | [observations.proto](../proto/messages/observations.proto) | 相机设备与成像信息 | 编码已知为JPEG；ID、尺寸和坐标系为optional，来源未知时为None |
 | `CameraSample` | [observations.proto](../proto/messages/observations.proto) | 复用 `CameraFrame` 和 `CameraInfo`，附带时间和可选帧序号 | 查询和流已接 JPEG 来源；流序号为服务发布计数，时间和尺寸等未知信息未接入，需设备验收 |
-| `FootContact` | [observations.proto](../proto/messages/observations.proto) | 足端标识、可选接触状态、可选三轴力 N、坐标系和时间 | 仅定义格式，设备支持和真实来源待确认；缺少力传感器时不推算或填造力值 |
 | `LightSample` | [observations.proto](../proto/messages/observations.proto) | 光照强度 lux 和时间 | 仅定义格式，传感器支持和真实来源待确认 |
 | `TaskRunState`、`TaskRunStatus` | [tasks.proto](../proto/messages/tasks.proto) | 高层任务运行状态 | SDK 从当前 AgentPlanner 查询或 `Run` 流解析状态、原因与摘要。当前 run 的 50Hz 快照流已接通，历史查询、统一任务类型、阶段与进度仍待来源支持 |
 
@@ -86,14 +85,14 @@
 | 控制权 | 权限空闲、当前持有方、本会话持权 | 查询与最高50Hz快照 | 已接申请、重新申请、释放与native权限快照，快照可合并，完整逐次事件仍待扩展 |
 | 运动学 | 位置、姿态、机体/世界坐标系线速度与角速度 | 持续流 | 已接定位输入的map→body位姿和body三轴线/角速度，source及接收年龄随样本返回；real源默认状态导出约10Hz，缓存流可重复 |
 | 故障 | 代码、来源、等级、描述和来源覆盖 | 查询与最高50Hz快照 | 已接driver控制/健康与navigation控制循环，更多来源和历史生命周期待接入 |
-| 电池与充电 | 电量、充电状态，以及硬件支持的电压、电流、温度 | 查询与低频更新 | 尚未确认可靠 BMS 来源；不得从电机母线电压推算电量 |
+| 电源电压 | 各电机母线电压，单位 V | `motor_voltages()` 查询 | V1 沿用 Brainstem `GetVoltage`；电池百分比和充电状态后续按实际 BMS 来源开放 |
 | 定位 | 当前地图、位姿、定位是否可用、状态与原因 | 查询与位姿流 | LingTu SLAM/定位，位姿流已接缓存，类型化状态已映射，源时间仍待完善 |
 | 地图 | 当前地图、建图状态、保存进度、栅格内容 | 查询、操作状态、内容流 | mapd、SLAM、ProductControl；保存栅格读取已接 mapd，未知区域不等于自由空间 |
 | 导航 | 路线、目标、规划/执行/暂停/恢复/结束状态、原因 | 查询与流/事件 | LingTu navd；路线流、任务暂停/恢复已接现有owner，实际执行仍待实机验收 |
 | 相机 | 画面、设备与帧状态 | 图像流和状态事件 | 现有 JPEG relay；编码和服务序号已接，帧标识/采样时间等仍按源表达缺失；CameraCalibration 单独提供已发布源彩色图标定，预览变换另验 |
 | 点云 | 扫描、地图预览、坐标对齐与场景重置 | 帧流 | 现有显示源已提供 PCLD v2；标准格式需写清预览性质和量化，不重复维护另一套点云事实 |
 | 高层任务 | 当前 run 状态、结果与失败原因 | 查询与 50Hz 快照流 | 已接 AgentPlanner 当前 run，Agent 统一类型/阶段/进度与跟随仍待补；巡检路线、任务流和报告已单独接已有 owner |
-| 足端接触/足力、光照、外设 | 型号真实支持的数据 | 按设备来源确定 | `FootContact`、`LightSample` 已定义格式，真实来源/设备支持仍待确认且无接收 RPC；外设类型待具体设备确认，不作为每台机器人必有的 V1 能力 |
+| 光照、外设 | 型号真实支持的数据 | 按设备来源确定 | `LightSample` 已定义格式，真实来源/设备支持待确认且无接收 RPC；外设类型按具体设备确定 |
 
 ## 频率、时间和未知值
 
