@@ -72,8 +72,6 @@ Rust 是当前主线。Brainstem C++ 客户端保留独立的[构建与安装说
 - [gRPC 推进与验证记录](docs/grpc-v1-progress.md)
 
 `cargo test --locked` 运行客户端测试和使用说明中的示例编译检查。
-七域接口已接入本地 gRPC 服务，已提供站起/坐下请求、受控遥操作双向流、50Hz任务运行快照流、类型化定位状态，以及 IMU、关节、相机和点云订阅。姿态链原生构建与本地合同验证已通过，设备动作待现场验收，BMS、足端等真实数据源仍待接入。当前方法与来源边界见使用说明。
-
-七域 Gateway 的 gRPC 服务支持 API key 鉴权和 TLS，客户端支持私有 CA。当前 `BrainstemClient` 只接受受控网络中的 `http://` 端点，尚未接入 TLS。已有测试证据、仿真与实机边界见推进记录，本库尚未正式发布。
+七域 Gateway 支持 API key 和 TLS。`BrainstemClient` 直连支持 mTLS，证书配置见 [Brainstem API](docs/api/brainstem.md)。设备动作与观测流长稳的真机结果见[测试记录](TESTING.md)。
 
 推进记录中以 `D:/` 开头的链接是开发机上的历史测试证据，不随本仓库分发；API、协议、示例和构建说明使用仓库内链接。
