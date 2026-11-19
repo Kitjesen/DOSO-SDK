@@ -4,10 +4,10 @@ SDK 对外提供查询和订阅，数据由现有机器人端服务产生。下�
 
 | 数据 | 当前 SDK | 机器人端来源 | 后续工作 |
 | --- | --- | --- | --- |
-| IMU | `BrainstemClient::listen_imu()` 流 | Brainstem `ListenImu` | 真机 900 秒平均约99.993Hz，但最大空窗约23.5秒，长稳未通过 |
-| 关节位置、速度、力矩 | `BrainstemClient::listen_joint()` 流 | Brainstem `ListenJoint` | 真机 900 秒各轴平均99.918–99.940Hz，但最大空窗约18.6秒，长稳未通过 |
+| IMU | `BrainstemClient::listen_imu()` 流 | Brainstem `ListenImu` | 目标 100 Hz，连续交付情况见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md) |
+| 关节位置、速度、力矩 | `BrainstemClient::listen_joint()` 流 | Brainstem `ListenJoint` | 16 轴分别验收频率和接收间隔，见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md) |
 | 电机在线、温度、状态及故障码 | `observations().motors()` 单次查询 | Brainstem `GetMotorStatus` | 源增加报告有效性信息；离线默认值不能证明健康 |
-| 电机母线电压 | `BrainstemClient::voltage()` 单次查询 | Brainstem `GetVoltage` | 真机静态16轴读取通过；与实时流并发查询曾超时，周期稳定性待修复后重测 |
+| 电机母线电压 | `BrainstemClient::voltage()` 单次查询 | Brainstem `GetVoltage` | 已验证与 IMU、关节流并行的 15 分钟周期查询，见[测试记录](../TESTING.md) |
 | 系统、就绪与健康 | `system()` 多项查询 | Gateway、ProductControl 等 | 按真实产品完善字段和设备验收 |
 | 身体状态 | `motion().body_state()` 查询、`watch_body_state()` 事件流 | Brainstem 身体状态机 | 实机验证状态转换 |
 | 地图位姿和定位状态 | `localization().pose()`、`status()` 单次查询 | LingTu 定位与 SLAM | 位姿订阅及设备验收 |

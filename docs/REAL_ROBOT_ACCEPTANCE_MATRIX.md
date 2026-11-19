@@ -1,6 +1,6 @@
 # DOSO SDK 七域真机验收矩阵
 
-更新日期：2026-11-15。本文用于 `rust` 分支的真实机器人验收。它描述验收动作和证据，不把本地 gRPC 合同测试、Gateway 仿真或历史现场记录写成真机通过。
+更新日期：2026-11-19。本文记录 `rust` 分支的真实机器人验收动作、标准和结果。
 
 ## 验收规则
 
@@ -67,19 +67,19 @@ cargo run --example read_brainstem -- http://<robot>:13145
 
 | 项目 | 内容 |
 | --- | --- |
-| 目标 | 证明 Brainstem 观测流和基础状态查询的实际连续性、索引、源时间和返回完整性 |
+| 目标 | 验收 Brainstem 观测流的连续性和并发状态查询的完整性 |
 | SDK 入口 | `BrainstemClient::listen_imu()`、`listen_joint()`、`control_status()`、`profile()`、`voltage()`、`motor_status()` |
-| IMU/关节窗口 | 连续 900 秒，同时消费 IMU 和全部关节轴。记录接收时间、源时间、序号、每轴样本数、间隔和错误。 |
-| 状态查询窗口 | 与 IMU/关节流并行，每 10 秒读取一次 control status、Profile、电压和电机状态。记录查询耗时、错误、数组长度、零电压数量和在线电机最小值。 |
-| 建议通过阈值 | IMU 平均频率 `98–102Hz`。每个关节轴平均频率 `98–102Hz`。单次空窗不超过 2 秒。单轴最大接收间隔建议不超过 200ms。状态查询每个周期均成功，控制状态、Profile、电压和电机数组完整。电压零值和在线电机数量全部记录。 |
-| 通过标准 | 所有轴都持续有样本，频率和间隔满足阈值，源错误按真实错误交付，取消流后连接资源释放。SDK 不把缓存重复当成新采样。 |
-| 失败处理 | 任一流停流、轴缺失、源时间倒退或错误被吞掉时停止长稳结论，记录失败窗口和最后一条有效样本。 |
-| 证据 | `03-brainstem-observations-900s.log`、查询摘要、原始日志和频率统计。 |
+| 基线窗口 | 连续 900 秒并行读取 IMU 和 16 轴关节，每 10 秒读取控制状态、Profile、电压和电机状态。验收 90 轮、360 次调用。15 分钟通过后建议扩展到 3,600 秒、360 轮、1,440 次调用。 |
+| 通过标准 | 完整跑满窗口，工具报告 `passed=true` 并以 `0` 退出。IMU 和每个轴平均频率均为 98–102 Hz。SDK 接收空窗和机端消息时间戳间隔分别统计，各路最大值均不超过 2 秒。每轮四项查询成功、16 路电压均为有限非零值且读到 16 个在线电机。 |
+| 抖动观测 | 保留 `imu` 和 `joint_0` 至 `joint_15` 的最大接收空窗，标出超过 200 ms 的关节轴。200 ms 用于观察波动，2 秒用于判定。机端消息时间戳用于衡量机端消息间隔。 |
+| 判定 | `13145` 无监听或无法建立连接时记为 `BLOCKED`。窗口开始后提前结束、查询失败、缺轴、机端时间戳异常或未达阈值时记为 `FAIL`。纯流窗口 `900 0` 用于定位并发影响。 |
+| 证据 | 记录命令、SDK 版本或提交、设备和机端 boot ID、Brainstem 构建版本、开始及结束时间、原始标准输出和错误输出、退出码。保留逐轴样本数、频率、两类最大间隔和查询摘要。 |
 
-建议命令：
+HTTPS 端点与证书按现场配置使用。[证书配置](api/brainstem.md)
 
-```text
-cargo run --example measure_brainstem -- http://<robot>:13145 900 10
+```powershell
+cargo run --locked --release --example measure_brainstem -- https://thunder-01.local:13145 900 10
+cargo run --locked --release --example measure_brainstem -- https://thunder-01.local:13145 3600 10
 ```
 
 ## 4. Localization 和地图状态
@@ -144,7 +144,7 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 | --- | --- | --- | --- | --- | --- |
 | 1 System | `NOT RUN` |  |  |  |  |
 | 2 Motion | `NOT RUN` |  |  |  |  |
-| 3 Observations | `FAIL`（BrainstemClient 直连 13145。900 秒纯流平均频率接近100Hz，但 IMU 最大空窗约23.5秒、关节最大空窗约18.6秒；并发查询探针还出现约3.1秒空窗） | 2026-11-18 | SDK 工作区当前改动 | `D:\DOSO\artifacts\robot-cloud\sdk-direct-brainstem-20261118` | 需要先处理 Brainstem 流调度/停流问题 |
+| 3 Observations | `FAIL`。并发 900 秒，IMU / 最差关节轴接收空窗 8.747 / 4.696 秒；纯流 900 秒，两者均为 31.456 秒。360 次并发查询成功。 | 2026-11-19 20:34–21:05 CST | `v0.2.0` / `3265d81` | [两轮真机报告](D:/DOSO/artifacts/robot-cloud/sdk-soak-20261119T201433/RESULT.md) | 2 秒连续交付门槛未通过；1 小时验收待执行 |
 | 4 Localization/Maps | `NOT RUN` |  |  |  |  |
 | 5 Point cloud/Camera/Video | `FAIL`（relay 预热后相机临时桥通过；正式 5052、点云、App、公网未通过，冷启动不稳定） | 2026-11-15 | SDK 2bf587b | `D:\DOSO\artifacts\robot-cloud\real-connect-20261113` | 见相机窗口记录 |
 | 6 Navigation | `NOT RUN` |  |  |  |  |

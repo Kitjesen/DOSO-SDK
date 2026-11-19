@@ -22,6 +22,7 @@ const JOINTS: usize = 16;
 struct ReceiveGaps {
     last: Instant,
     max: Duration,
+    max_ends_at: Instant,
     long_gaps: u64,
     first_long_gap: Option<Duration>,
 }
@@ -31,6 +32,7 @@ impl ReceiveGaps {
         Self {
             last: start,
             max: Duration::ZERO,
+            max_ends_at: start,
             long_gaps: 0,
             first_long_gap: None,
         }
@@ -43,9 +45,12 @@ impl ReceiveGaps {
             self.long_gaps += 1;
             self.first_long_gap.get_or_insert(gap);
         }
-        let new_max = gap > self.max;
-        self.max = self.max.max(gap);
-        new_max
+        if gap <= self.max {
+            return false;
+        }
+        self.max = gap;
+        self.max_ends_at = now;
+        true
     }
 }
 
@@ -112,10 +117,10 @@ impl SampleStats {
             .map(|(first, last)| (last - first).as_secs_f64())
     }
 
-    fn report(&self, name: &str) {
+    fn report(&self, name: &str, start: Instant) {
         let ms = |gap: Duration| gap.as_secs_f64() * 1000.0;
         println!(
-            "{name} samples={} receive_max_gap_ms={:.3} receive_long_gaps={} receive_first_long_gap_ms={:?} source_max_gap_ms={:?} source_gap_at_receive_max_ms={:?} invalid_timestamps={}",
+            "{name} samples={} receive_max_gap_ms={:.3} receive_long_gaps={} receive_first_long_gap_ms={:?} source_max_gap_ms={:?} source_gap_at_receive_max_ms={:?} invalid_timestamps={} receive_max_gap_end_s={:.3}",
             self.count,
             ms(self.received.max),
             self.received.long_gaps,
@@ -123,6 +128,7 @@ impl SampleStats {
             self.source_max_gap.map(ms),
             self.source_at_receive_max.map(ms),
             self.invalid_timestamps,
+            self.received.max_ends_at.duration_since(start).as_secs_f64(),
         );
     }
 }
@@ -166,6 +172,17 @@ impl QueryStats {
             control_samples: 0,
             profile_samples: 0,
         }
+    }
+
+    fn is_complete(&self, expected_cycles: u64) -> bool {
+        self.failures == 0
+            && self.malformed == 0
+            && self.cycles == expected_cycles
+            && self.calls == expected_cycles * 4
+            && self.control_samples == expected_cycles
+            && self.profile_samples == expected_cycles
+            && self.motor_samples == expected_cycles
+            && self.voltage_values == expected_cycles * JOINTS as u64
     }
 }
 
@@ -370,7 +387,12 @@ async fn main() -> BoxResult<()> {
     if query_interval > 300 {
         return Err("query_interval_seconds must be between 0 and 300".into());
     }
-    let queries_enabled = query_interval > 0;
+    let expected_query_cycles = if query_interval == 0 {
+        0
+    } else {
+        seconds.div_ceil(query_interval)
+    };
+    let queries_enabled = expected_query_cycles > 0;
 
     let stream_client = brainstem::connect(&args[0]).await?;
     let queries = if queries_enabled {
@@ -453,14 +475,7 @@ async fn main() -> BoxResult<()> {
     let motor_online_ok = queries.motor_online_min == Some(16);
     let voltage_ok = queries.voltage_zero_values == 0;
     let query_data_ok = !queries_enabled || (motor_online_ok && voltage_ok);
-    let queries_ok = !queries_enabled
-        || (queries.failures == 0
-            && queries.malformed == 0
-            && queries.cycles > 0
-            && queries.control_samples == queries.cycles
-            && queries.profile_samples == queries.cycles
-            && queries.motor_samples == queries.cycles
-            && queries.voltage_values == queries.cycles * 16);
+    let queries_ok = queries.is_complete(expected_query_cycles);
     let passed = imu_stream.complete
         && joint_stream.complete
         && malformed_joints == 0
@@ -484,14 +499,14 @@ async fn main() -> BoxResult<()> {
         joint_stream.messages as f64 / observed,
         joint_stream.received.max.as_secs_f64() * 1000.0,
     );
-    imu.report("imu");
+    imu.report("imu", start);
     for (id, axis) in joints.iter().enumerate() {
-        axis.report(&format!("joint_{id}"));
+        axis.report(&format!("joint_{id}"), start);
     }
     println!("joint_counts={joint_counts:?}");
     println!("joint_axis_hz_min={min_joint_hz:.3} joint_axis_hz_max={max_joint_hz:.3}");
-    println!("queries cycles={} calls={} failures={} malformed={} control_samples={} profile_samples={} motor_samples={} motor_online_min={:?} motor_temperature_max_c={:?} voltage_values={} voltage_zero_values={} voltage_min_v={:?} voltage_max_v={:?}", queries.cycles, queries.calls, queries.failures, queries.malformed, queries.control_samples, queries.profile_samples, queries.motor_samples, queries.motor_online_min, queries.motor_temperature_max, queries.voltage_values, queries.voltage_zero_values, queries.voltage_min, queries.voltage_max);
-    println!("thresholds frequency_ok={frequency_ok} gap_ok={gap_ok} source_ok={source_ok} query_data_ok={query_data_ok} motor_online_ok={motor_online_ok} voltage_ok={voltage_ok}");
+    println!("queries cycles={} calls={} failures={} malformed={} control_samples={} profile_samples={} motor_samples={} motor_online_min={:?} motor_temperature_max_c={:?} voltage_values={} voltage_zero_values={} voltage_min_v={:?} voltage_max_v={:?} expected_cycles={expected_query_cycles}", queries.cycles, queries.calls, queries.failures, queries.malformed, queries.control_samples, queries.profile_samples, queries.motor_samples, queries.motor_online_min, queries.motor_temperature_max, queries.voltage_values, queries.voltage_zero_values, queries.voltage_min, queries.voltage_max);
+    println!("thresholds frequency_ok={frequency_ok} gap_ok={gap_ok} source_ok={source_ok} query_data_ok={query_data_ok} motor_online_ok={motor_online_ok} voltage_ok={voltage_ok} queries_ok={queries_ok}");
     if !passed {
         return Err("Brainstem stability window failed".into());
     }
@@ -517,13 +532,32 @@ mod tests {
         stats.record(start + Duration::from_secs(3), Some(&timestamp(10)));
 
         assert_eq!(stats.received.max, Duration::from_secs(3));
+        assert_eq!(stats.received.max_ends_at, start + Duration::from_secs(3));
         assert_eq!(stats.received.long_gaps, 1);
         assert_eq!(stats.source_at_receive_max, Some(Duration::from_millis(10)));
         assert!(stats.source_ok());
 
         stats.finish(start + Duration::from_secs(7));
         assert_eq!(stats.received.max, Duration::from_secs(4));
+        assert_eq!(stats.received.max_ends_at, start + Duration::from_secs(7));
         assert_eq!(stats.source_at_receive_max, None);
+    }
+
+    #[test]
+    fn acceptance_requires_every_scheduled_query() {
+        let mut stats = QueryStats::new();
+        assert!(stats.is_complete(0));
+        stats.cycles = 89;
+        stats.calls = 356;
+        stats.control_samples = 89;
+        stats.profile_samples = 89;
+        stats.motor_samples = 89;
+        stats.voltage_values = 89 * JOINTS as u64;
+        assert!(stats.is_complete(89));
+        assert!(!stats.is_complete(90));
+
+        stats.calls -= 1;
+        assert!(!stats.is_complete(89));
     }
 
     #[test]

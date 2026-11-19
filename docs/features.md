@@ -101,10 +101,10 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 
 | 功能 | API | 实际来源 | 验证与限制 |
 | --- | --- | --- | --- |
-| IMU 源事件 | `listen_imu` | Brainstem ListenImu | 真机 900 秒窗口平均 99.993Hz、源跨度约900秒，但最大空窗约23.5秒，长稳验收失败；无加速度字段。 |
-| 单关节/整帧事件 | `listen_joint` | Brainstem ListenJoint | 真机 900 秒窗口各轴平均99.918–99.940Hz，但最大空窗约18.6秒，长稳验收失败；索引见[关节编号](api/observations.md#doso-thunder-16-轴编号) |
+| IMU 源事件 | `listen_imu` | Brainstem ListenImu | 已读到角速度和四元数，线加速度缺失。连续交付见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md) |
+| 单关节/整帧事件 | `listen_joint` | Brainstem ListenJoint | 16 轴已读通，逐轴长稳结果见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md)。索引见[关节编号](api/observations.md#doso-thunder-16-轴编号) |
 | 电机状态、温度、原始错误 | `motors` | Brainstem GetMotorState | 本地字段与错误已测；无统一有效位和采样时间，离线默认值不证明健康 |
-| 电机母线电压 | `voltage` | Brainstem `GetVoltage`，CAN 参数查询 | 真机静态读取16轴均返回非零值；与实时流并发时查询曾超时，需修复并发调度后重做周期稳定性验收 |
+| 电机母线电压 | `voltage` | Brainstem `GetVoltage`，CAN 参数查询 | 16 路静态及 15 分钟并发周期查询均已实测；各窗口结果见[测试记录](../TESTING.md) |
 | 相机状态与 JPEG | `camera_status`、`camera_frame`、`watch_camera` | 现有 JPEG relay、媒体访问规则 | 真机 go2rtc producer 修复后 LAN relay/WHEP 与 5/5 JPEG 窗口通过；临时桥 SDK 单帧已通过；正式 5052 未部署，冷启动就绪语义仍需正式 Gateway 验收 |
 | 类型化帧与源相机内参 | `camera_sample`、`watch_camera_samples`、`camera_calibration` | relay 发布序号、真实相机 CameraIntrinsics | 真实 relay 连续 10 帧/序号 1–10 已通过（需预热）；正式 5052、内参对应关系、手机渲染仍未验收 |
 | 实时扫描/地图显示点云 | `watch_point_cloud`、`CloudFrame::decode` | CloudViewer 显示发布器 | 本地缓存/reset/颜色/跨线程/超大帧已测；PCLD v2 为量化预览，地图约 4Hz/扫描约 10Hz，真机流未验收 |
