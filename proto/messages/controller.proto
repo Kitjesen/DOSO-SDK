@@ -9,6 +9,16 @@ enum ControllerMode {
   CONTROLLER_MODE_EXTERNAL = 2;
 }
 
+// Read-only RC stick and switch telemetry forwarded from Board A for untethered RL policies.
+message RemoteState {
+  double lx = 1;
+  double ly = 2;
+  double rx = 3;
+  double ry = 4;
+  uint32 buttons = 5;
+  bool active = 6;
+}
+
 message ControllerState {
   ControllerMode mode = 1;
   string session_id = 2;
@@ -21,6 +31,7 @@ message ControllerState {
   bool fresh = 8;
   bool motor_disable_confirmed = 9;
   uint32 joint_count = 10;
+  optional RemoteState remote = 11;
 }
 
 // Robot joint order. q in rad, dq in rad/s, tau in N*m.

@@ -97,10 +97,14 @@ class GenerationTest(unittest.TestCase):
                 [
                     sys.executable,
                     "-c",
-                    "from runtime.adapters.brainstem.generated.brainstem_api.cms_pb2 import Imu, Joint; "
+                    "from runtime.adapters.brainstem.generated.brainstem_api.cms_pb2 import Imu, Joint, ProfileInfo; "
                     "from runtime.adapters.brainstem.generated.brainstem_api.external_pb2 import ExternalStatus; "
+                    "from runtime.adapters.brainstem.generated.brainstem_api.recovery_pb2 import RobotModeCapability, RecoveryStatus; "
                     "assert Imu.DESCRIPTOR.full_name == 'brainstem.api.v1.Imu'; "
                     "assert ExternalStatus.DESCRIPTOR.full_name == 'brainstem.api.v1.ExternalStatus'; "
+                    "assert RecoveryStatus.DESCRIPTOR.full_name == 'brainstem.api.v1.RecoveryStatus'; "
+                    "assert RobotModeCapability.DESCRIPTOR.full_name == 'brainstem.api.v1.RobotModeCapability'; "
+                    "assert 'mode_capabilities' in ProfileInfo.DESCRIPTOR.fields_by_name; "
                     "assert Joint.DESCRIPTOR.full_name == 'brainstem.api.v1.Joint'",
                 ],
                 cwd=directory,

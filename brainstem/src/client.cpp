@@ -128,6 +128,9 @@ BodyState decodeBodyState(const api::v1::CmsState &source) {
     case api::v1::CMS_STATE_KIND_WALKING:
       state.kind = BodyStateKind::Walking;
       break;
+    case api::v1::CMS_STATE_KIND_DAMPING:
+      state.kind = BodyStateKind::Damping;
+      break;
     case api::v1::CMS_STATE_KIND_TRANSITIONING:
       state.kind = BodyStateKind::Transitioning;
       break;
@@ -800,6 +803,35 @@ Result Client::stop() noexcept {
 Result Client::standUp() { return bodyAction(true); }
 
 Result Client::sitDown() { return bodyAction(false); }
+
+Result Client::damp() {
+  google::protobuf::Empty request;
+  google::protobuf::Empty response;
+  grpc::ClientContext context;
+  impl_->setDeadline(context);
+  const grpc::Status status = impl_->stub->Damp(&context, request, &response);
+  if (!status.ok()) {
+    Result failure = withCachedState(rpcFailure(status, "Damp"), impl_->last_state);
+    impl_->last_state = failure.state;
+    return failure;
+  }
+
+  impl_->clearLease();
+  ControlState state = impl_->last_state;
+  state.connected = true;
+  state.motion_ready = false;
+  state.lease_valid = false;
+  state.initial_zero_acknowledged = false;
+  state.body.kind = (state.body.kind == BodyStateKind::Grounded ||
+                     state.body.kind == BodyStateKind::Zero)
+                        ? state.body.kind
+                        : BodyStateKind::Damping;
+  state.body.transition = BodyTransition::None;
+  state.body.gesture_name.clear();
+  state.reason = "body_action_accepted:damp";
+  impl_->last_state = state;
+  return {true, true, true, true, state, {}};
+}
 
 Result Client::enableMotors() { return motorPower(true); }
 

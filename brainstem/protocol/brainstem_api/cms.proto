@@ -3,7 +3,7 @@
 // RobotControl — brainstem 对外的主控 gRPC 服务。
 // 提供运动控制指令和实时传感器数据流。
 //
-// API Version: 2.2.0 (2026-08-21)
+// API Version: v0.0.1 (2026-11-21)
 //
 // 兼容性承诺 (within 2.x):
 //   - 现有 RPC 的签名和语义不会改变
@@ -22,6 +22,7 @@ syntax = "proto3";
 
 import "google/protobuf/empty.proto";
 import "brainstem_api/common.proto";
+import "brainstem_api/recovery.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
 
@@ -59,6 +60,8 @@ service RobotControl {
   rpc StandUp(google.protobuf.Empty) returns (google.protobuf.Empty);
   // 从站立过渡到坐姿。
   rpc SitDown(google.protobuf.Empty) returns (google.protobuf.Empty);
+  // 解析式阻尼软急停：12 腿轴 Kp=0 纯阻尼泄力，4 足轮零速制动，静止 1s 自动收敛至 Grounded。
+  rpc Damp(google.protobuf.Empty) returns (google.protobuf.Empty);
   // 设置速度模式。NORMAL=默认, HIGH_SPEED=高速模式(最大 2.5m/s)。
   rpc SetSpeedMode(SpeedModeRequest) returns (google.protobuf.Empty);
   // 获取当前速度模式。
@@ -91,7 +94,8 @@ service RobotControl {
 
   // ──── 策略切换 ────
 
-  // 切换到指定策略。机器人必须在 Grounded 状态。
+  // 切换到指定运动策略。Standing 或 Grounded（prone / 趴地）时允许；
+  // Walking 期间不允许，已选择 fall recovery 时也不允许。
   rpc SwitchProfile(ProfileRequest) returns (ProfileInfo);
   // 获取当前策略信息。
   rpc GetProfile(google.protobuf.Empty) returns (ProfileInfo);
@@ -254,6 +258,8 @@ message ProfileInfo {
   repeated string descriptions = 3;
   // 当前策略的说明。
   string current_description = 4;
+  repeated RobotModeCapability mode_capabilities = 5;
+  string active_mode_id = 6;
 }
 
 // 运动指令。
@@ -263,6 +269,7 @@ enum CmsStateKind {
   CMS_STATE_KIND_STANDING = 2;
   CMS_STATE_KIND_WALKING = 3;
   CMS_STATE_KIND_TRANSITIONING = 4;
+  CMS_STATE_KIND_DAMPING = 5;
 }
 
 enum CmsTransitionKind {
@@ -352,6 +359,8 @@ message Command {
     google.protobuf.Empty sit_down = 3;
     // 机身速度：x=前后 m/s，y=左右 m/s，z=旋转 rad/s。
     Vector3 walk = 4;
+    // 阻尼软急停：腿轴零刚度纯阻尼，足轮零速阻尼制动。
+    google.protobuf.Empty damp = 5;
   }
 }
 

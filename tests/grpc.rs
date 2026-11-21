@@ -190,6 +190,7 @@ impl rpc::system_server::System for Service {
                     }
                     .into()
                 }),
+                low_level_endpoint: None,
             }),
         }))
     }
@@ -676,6 +677,57 @@ impl rpc::motion_server::Motion for Service {
         request: Request<rpc::Command>,
     ) -> Result<Response<rpc::Receipt>, Status> {
         self.stand_up(request).await
+    }
+    async fn damp(&self, request: Request<rpc::Command>) -> Result<Response<rpc::Receipt>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        let mut response = self.receipt(request.into_inner())?;
+        response.get_mut().stage = "damping_requested".into();
+        Ok(response)
+    }
+    async fn clear_motor_fault(
+        &self,
+        request: Request<rpc::ClearMotorFaultRequest>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        let mut response = self.receipt(request.into_inner().command.unwrap())?;
+        response.get_mut().stage = "fault_cleared".into();
+        Ok(response)
+    }
+    async fn list_gestures(
+        &self,
+        request: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::GestureList>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        Ok(Response::new(rpc::GestureList {
+            gestures: vec![rpc::GestureInfo {
+                name: "bow".into(),
+                description: "Bow".into(),
+                duration_ms: 1800,
+            }],
+        }))
+    }
+    async fn play_gesture(
+        &self,
+        request: Request<rpc::PlayGestureRequest>,
+    ) -> Result<Response<rpc::Receipt>, Status> {
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "test-only-key"
+        );
+        let inner = request.into_inner();
+        assert!(!inner.name.trim().is_empty());
+        let mut response = self.receipt(inner.command.unwrap())?;
+        response.get_mut().stage = format!("gesture:{}", inner.name);
+        Ok(response)
     }
     async fn enable_motors(
         &self,
@@ -3341,4 +3393,178 @@ async fn oversized_reply_leaves_submission_unknown() {
     assert_eq!(error.request_id.as_deref(), Some("large-1"));
     assert!(error.submission_unknown);
     assert_eq!(fixture.service.writes.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn robot_client_supports_damp_fault_clear_gestures_and_stand_down() {
+    let fixture = Fixture::new().await;
+    let robot: &doso_sdk::RobotClient = &fixture.client;
+
+    let damp = robot.sport().damp(Some("damp-1")).await.unwrap();
+    assert_eq!(damp.request_id, "damp-1");
+    assert_eq!(damp.stage, "damping_requested");
+
+    let down = robot.sport().stand_down(Some("down-1")).await.unwrap();
+    assert_eq!(down.request_id, "down-1");
+    assert_eq!(down.stage, "posture_requested");
+
+    let err = robot
+        .sport()
+        .clear_motor_fault([16], Some("bad-fault"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::InvalidInput);
+
+    let cleared = robot
+        .sport()
+        .clear_motor_fault([0, 15], Some("clear-1"))
+        .await
+        .unwrap();
+    assert_eq!(cleared.request_id, "clear-1");
+    assert_eq!(cleared.stage, "fault_cleared");
+
+    let gestures = robot.sport().list_gestures().await.unwrap();
+    assert_eq!(gestures.gestures.len(), 1);
+    assert_eq!(gestures.gestures[0].name, "bow");
+
+    let played = robot
+        .sport()
+        .play_gesture("bow", Some("gesture-1"))
+        .await
+        .unwrap();
+    assert_eq!(played.request_id, "gesture-1");
+    assert_eq!(played.stage, "gesture:bow");
+
+    let empty_err = robot.sport().play_gesture("   ", None).await.unwrap_err();
+    assert_eq!(empty_err.kind, ErrorKind::InvalidInput);
+}
+
+#[derive(Clone)]
+struct RedirectingSystem {
+    low_level_endpoint: String,
+}
+
+#[tonic::async_trait]
+impl rpc::system_server::System for RedirectingSystem {
+    async fn handshake(
+        &self,
+        _: Request<rpc::Handshake>,
+    ) -> Result<Response<rpc::HandshakeReply>, Status> {
+        Ok(Response::new(rpc::HandshakeReply {
+            protocol_version: 2,
+            info: Some(rpc::SystemInfo {
+                firmware_version: Some("v3-split".into()),
+                robot_version: Some("doso-thunder".into()),
+                robot_id: Some("8f7e1c62-0a4d-4b89-96e2-6c47b03db1a5".into()),
+                low_level_endpoint: Some(self.low_level_endpoint.clone()),
+            }),
+        }))
+    }
+    async fn ping(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Ping>, Status> {
+        Ok(Response::new(rpc::Ping {
+            status: "ok".into(),
+        }))
+    }
+    async fn state(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+    async fn robot_status(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::RobotStatus>, Status> {
+        Ok(Response::new(rpc::RobotStatus::default()))
+    }
+    async fn health(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+    async fn faults(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::FaultReport>, Status> {
+        Ok(Response::new(rpc::FaultReport::default()))
+    }
+    type WatchFaultsStream = Pin<Box<dyn Stream<Item = Result<rpc::FaultReport, Status>> + Send>>;
+    async fn watch_faults(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<Self::WatchFaultsStream>, Status> {
+        Ok(Response::new(Box::pin(tokio_stream::empty())))
+    }
+    async fn readiness(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+    async fn capabilities(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+    async fn session(&self, _: Request<rpc::Empty>) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+    async fn product_status(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::Snapshot>, Status> {
+        Ok(Response::new(rpc::Snapshot::default()))
+    }
+}
+
+#[tokio::test]
+async fn robot_client_routes_low_level_to_advertised_direct_endpoint() {
+    let fast_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fast_endpoint = format!("http://{}", fast_listener.local_addr().unwrap());
+    let fast_service = Service::default();
+    let (fast_tx, fast_rx) = oneshot::channel();
+    let fast_server = tonic::transport::Server::builder()
+        .add_service(rpc::motion_server::MotionServer::new(fast_service.clone()));
+    tokio::spawn(async move {
+        fast_server
+            .serve_with_incoming_shutdown(TcpListenerStream::new(fast_listener), async {
+                let _ = fast_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let main_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let main_endpoint = format!("http://{}", main_listener.local_addr().unwrap());
+    let (main_tx, main_rx) = oneshot::channel();
+    let main_server = tonic::transport::Server::builder().add_service(
+        rpc::system_server::SystemServer::new(RedirectingSystem {
+            low_level_endpoint: fast_endpoint.clone(),
+        }),
+    );
+    tokio::spawn(async move {
+        main_server
+            .serve_with_incoming_shutdown(TcpListenerStream::new(main_listener), async {
+                let _ = main_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let mut cfg = doso_sdk::RobotConfig::new(main_endpoint);
+    cfg.api_key = Some("test-only-key".into());
+    let robot = doso_sdk::RobotClient::with_config(cfg).await.unwrap();
+    assert_eq!(
+        robot.system().info().low_level_endpoint.as_deref(),
+        Some(fast_endpoint.as_str())
+    );
+
+    let mut ll = robot.low_level(Some("ll-direct")).await.unwrap();
+    let mut cmds = vec![rpc::JointCommand::leg_pd(0.1, 10.0, 1.0); 12];
+    cmds.extend(std::iter::repeat_n(
+        rpc::JointCommand::wheel_vel(2.0, 1.5),
+        4,
+    ));
+    ll.publish_joints(cmds, Some("ll-frame")).unwrap();
+    for _ in 0..100 {
+        if ll.state().unwrap().unwrap().last_sequence == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(fast_service.writes.load(Ordering::Relaxed), 1);
+    assert!(ll.close(Some("ll-close")).await.unwrap().accepted);
+
+    let _ = fast_tx.send(());
+    let _ = main_tx.send(());
 }

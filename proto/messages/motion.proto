@@ -15,6 +15,7 @@ enum BodyKind {
   BODY_KIND_STANDING = 2;
   BODY_KIND_WALKING = 3;
   BODY_KIND_TRANSITIONING = 4;
+  BODY_KIND_DAMPING = 5;
 }
 
 enum BodyTransition {
@@ -128,4 +129,24 @@ message TeleopReply {
   // Echo the request sequence. Zero with an empty request_id is a window update.
   uint64 sequence = 7;
   ControlState control = 8;
+}
+
+message GestureInfo {
+  string name = 1;
+  string description = 2;
+  int32 duration_ms = 3;
+}
+
+message GestureList {
+  repeated GestureInfo gestures = 1;
+}
+
+message PlayGestureRequest {
+  Command command = 1;
+  string name = 2;
+}
+
+message ClearMotorFaultRequest {
+  Command command = 1;
+  repeated uint32 joint_ids = 2;
 }

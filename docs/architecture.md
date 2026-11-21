@@ -168,21 +168,22 @@ flowchart LR
 
 native client作为Host加载的本地库提供C ABI与DDS通信。逐帧命令保留原输入窗口，经driver转发至Brainstem；生命周期操作经过navd仲裁。只读IMU与关节观测继续走已有的 `observations` 接口。
 
-当前三个仓库并列位于 `D:\inovxio\brain\`。下表的跨仓库源码链接按这个检出关系定位，列出的生产路径均已有实现：
+> [!WARNING]
+> [!NOTE]
+> **v0.0.1 双层策略架构状态说明**：按照 [v2 两层策略架构](architecture-v2.md) 与 [v3 收敛路线图](architecture-v3-dds-migration.md)，Brainstem `v0.0.1` 已在 `:13145` 恢复并接通 **`RobotExternalControl`（Layer-2 客户策略）**，共享唯一 `RealJoint`/`RealImu`/`ControlArbiter` 与 5 项 MIT `SafetyGate`（本地单测与 gRPC 闭环已通过，待通过 `v0.0.1` 发布包部署并验收真机；`RobotRecovery` 仍在 `brainstem.env` 中显式关闭）。下表对应三仓完整设计：
 
-| 责任 | 代码位置 | 具体实现 |
+| 责任 | 代码位置 | 状态与具体实现 |
 | --- | --- | --- |
-| 对外RPC与消息 | [motion.proto](../proto/motion.proto)、[controller.proto](../proto/messages/controller.proto) | `Controller`查询、`ExternalControl`双向流、六种流内动作和关节字段 |
-| Rust公开接口 | [motion/external.rs](../src/motion/external.rs)、[lib.rs](../src/lib.rs) | 会话、帧发布、后台回执、心跳、本地状态缓存及公共导出 |
-| 机器人公开服务 | [rpc/services.py](../../lingtu/src/gateway/rpc/services.py)、[rpc/external.py](../../lingtu/src/gateway/rpc/external.py) | 两个RPC入口、请求检查、命令路由、反馈与断线清理 |
-| Host命令入口 | [nav/commands/module.py](../../lingtu/src/nav/commands/module.py)、[native/commands.py](../../lingtu/src/nav/adapters/native/commands.py) | 外控命令、session及ACK关联 |
-| 本地C ABI与DDS | [native/abi.py](../../lingtu/src/nav/adapters/native/abi.py)、[client_c.cpp](../../lingtu/src/nav/cpp/client/client_c.cpp)、[client.cpp](../../lingtu/src/nav/cpp/client/client.cpp) | 生命周期请求、关节/心跳DDS发布和状态读取 |
-| driver执行入口 | [posture.cpp](../../lingtu/src/drivers/real/motion/posture.cpp)、[main.cpp](../../lingtu/src/drivers/real/motion/main.cpp) | 进入条件、生命周期执行、持续消费关节帧与心跳 |
-| DOSO机器人适配 | [robots/doso/doso.cpp](../../lingtu/src/drivers/real/motion/robots/doso/doso.cpp) | 转发关节五字段、使能/禁用与状态 |
-| 内部Brainstem客户端 | [brainstem/src/external.cpp](../brainstem/src/external.cpp) | driver持有私有token，调用后端gRPC并接收窗口和状态 |
-| Brainstem内部API | [external.proto](../../brainstem/brainstem_api/brainstem_api/external.proto)、[service.dart](../../brainstem/thunder/lib/src/external/service.dart) | `RobotExternalControl`的Enter、Enable、Disable、Heartbeat、Control、Exit和GetStatus |
-| 后端会话与内置隔离 | [runtime.dart](../../brainstem/thunder/lib/src/external/runtime.dart)、[cms.dart](../../brainstem/thunder_brain/lib/src/cms/cms.dart) | 唯一管理外控会话和输出期限，暂停/恢复内置行为 |
-| 电机硬件入口 | [thunder.dart](../../brainstem/thunder/bin/thunder.dart)、[real_joint.dart](../../brainstem/thunder/lib/src/real_joint.dart) | 关节字段映射、现有输出门及逐电机 `RSEvent.control` |
+| 对外RPC与消息 | [motion.proto](../proto/motion.proto)、[controller.proto](../proto/messages/controller.proto) | 合同保留：`Controller`查询、`ExternalControl`双向流、六种流内动作和关节字段 |
+| Rust公开接口 | [motion/external.rs](../src/motion/external.rs)、[lib.rs](../src/lib.rs) | 合同保留：会话、帧发布、后台回执、心跳、本地状态缓存及公共导出 |
+| 机器人公开服务 | [rpc/services.py](../../lingtu/src/gateway/rpc/services.py)、[rpc/external.py](../../lingtu/src/gateway/rpc/external.py) | 未在当前直接路径启用：两个RPC入口、请求检查、命令路由、反馈与断线清理 |
+| Host命令入口 | [nav/commands/module.py](../../lingtu/src/nav/commands/module.py)、[native/commands.py](../../lingtu/src/nav/adapters/native/commands.py) | 待收敛：外控命令、session及ACK关联 |
+| 本地C ABI与DDS | [native/abi.py](../../lingtu/src/nav/adapters/native/abi.py)、[client_c.cpp](../../lingtu/src/nav/cpp/client/client_c.cpp)、[client.cpp](../../lingtu/src/nav/cpp/client/client.cpp) | 待收敛：生命周期请求、关节/心跳DDS发布和状态读取 |
+| driver执行入口 | [posture.cpp](../../lingtu/src/drivers/real/motion/posture.cpp)、[main.cpp](../../lingtu/src/drivers/real/motion/main.cpp) | 待收敛：进入条件、生命周期执行、持续消费关节帧与心跳 |
+| DOSO机器人适配 | [robots/doso/doso.cpp](../../lingtu/src/drivers/real/motion/robots/doso/doso.cpp) | 待收敛：转发关节五字段、使能/禁用与状态 |
+| 内部Brainstem客户端 | [brainstem/src/external.cpp](../brainstem/src/external.cpp)、[BrainstemExternalClient](../src/brainstem/mod.rs) | 已实装并通过 Rust/C++ gRPC 闭环单测；driver 或外部客户程序持有会话 token |
+| Brainstem内部API | [external.proto](../brainstem/protocol/brainstem_api/external.proto) | **`v0.0.1` 已接入**：`ExternalService` + `ExternalRuntime` + [HardwareExternal](../../brainstem/thunder/lib/src/external/hardware_external.dart) 挂载于 `:13145`，受 `ControlArbiter` 与 `SafetyGate` 仲裁 |
+| 电机硬件入口 | [thunder.dart](../../brainstem/thunder/bin/thunder.dart)、[real_joint.dart](../../brainstem/thunder/lib/src/real_joint.dart) | 唯一 `JointCommandMux` 与 `SafetyGate`：Layer-1 内置策略与 Layer-2 External（5 项 MIT 帧 `validateExternalTargets`/`sendExternalTargets`）共享同一 `RealJoint` |
 
 客户部署自己的推理程序和模型；当前SDK提供控制接入，模型安装、上传和自动启动不属于已实现API。外部控制先准备整帧目标，再显式使能。实际调用方式见[逐方法对应表和示例](api/motion.md#接口与代码对应)，实现验证及现场边界见[推进记录](grpc-v1-progress.md#外部运控模式2026-11-07)。
 
@@ -216,9 +217,9 @@ native client作为Host加载的本地库提供C ABI与DDS通信。逐帧命令�
 | 控制权 | `TakeControl/ReleaseControl`，配套ACK、失权与可申请事件 | `SportClient(enableLease=false)`，基类支持可选lease等待与查询 | `claim_control`开同一Teleop会话，`claim`单次申请/重新申请，`release_control`复用close；native lease为1秒，权限提供最高50Hz快照，完整逐次事件尚无合同 |
 | 站起与降低身体 | `StandUp/BalanceStandUp/LieDown` | `StandUp/StandDown`，另有独立`Sit/RiseSit` | `stand_up/sit_down`已接nav仲裁和driver；当前动作对应Brainstem StandUp/SitDown，具体姿态按DOSO实机验收 |
 | 平面速度 | `MoveVelocity(x,y,yaw)`使用m/s、rad/s；`Move`使用归一化输入 | `Move(vx,vy,vyaw)` | `teleop().publish_velocity`持续提交机体XY线速度与Z角速度，`send_velocity`可等待接纳回执；本地50Hz已验证 |
-| 停止与软件急停 | 普通停止示例发送零控制量，`SoftEmergencyStop(bool)`独立控制急停 | `StopMove()`，另有`Damp()`动作 | `stop/hold/close`以及`emergency_stop/clear_emergency_stop`已接线；停止回执与身体反馈分别核查 |
+| 停止与软件急停 | 普通停止示例发送零控制量，`SoftEmergencyStop(bool)`独立控制急停 | `StopMove()`，另有`Damp()`动作 | `BrainstemClient::damp()` 与 C++ `brainstem::Client::damp()` 已接通 `v0.0.1` 解析式软急停（100ms 斜坡切入纯阻尼，静止至 `Grounded`）；`stop/hold/close` 以及 `emergency_stop/clear_emergency_stop` 在高层合同层已接线 |
 | 身体姿态与高度 | `PosControl/PosMove`提供位置与RPY，`HighLowStance`提供高低站姿 | 当前头文件公开`Euler`；本固定版示例中的`BodyHeight`仅为注释 | Euler、站高的机器人端执行能力与Rust接口待接入 |
-| 步态与恢复 | `Gait()`为无步态类型参数的方法，`SetSpeed()`设置速度等级 | `SpeedLevel/StaticWalk/TrotRun/EconomicGait/FreeWalk`及`RecoveryStand/Damp` | 具体步态、恢复与阻尼需先接执行方；DOSO driver声明stand/sit可用，recover/damp返回unsupported，Brainstem速度档位RPC当前UNIMPLEMENTED |
+| 步态与恢复 | `Gait()`为无步态类型参数的方法，`SetSpeed()`设置速度等级 | `SpeedLevel/StaticWalk/TrotRun/EconomicGait/FreeWalk`及`RecoveryStand/Damp` | Brainstem 端 `Damp` 已实装；`LingTu` [doso.cpp](../../lingtu/src/drivers/real/motion/robots/doso/doso.cpp) 的 `BodyAction::Damp`（Step 3.1）已联调通过；`RobotRecovery` 通过配置保持关闭，Brainstem 速度档位 RPC 当前 UNIMPLEMENTED |
 
 智身接口与控制权语义分别依据官方API说明和控制权说明。[智身API](https://github.com/zsibot/genisom_robot_sdk/blob/e8f959a22a6e5714bc299a551b45e1c182ac05c7/docs/zh/sdk_client_api_zh.md) · [智身控制权](https://github.com/zsibot/genisom_robot_sdk/blob/e8f959a22a6e5714bc299a551b45e1c182ac05c7/docs/zh/sdk_control_ownership_zh.md)
 
@@ -237,7 +238,7 @@ DOSO导航目标、任务暂停/恢复/取消由`navigation`维护，地图建�
 | 领域 | 已有 SDK 能力（代码层面） | 主要缺口 |
 | --- | --- | --- |
 | `system` | 身份、健康与就绪查询；类型化综合状态、就绪、已知故障与来源覆盖快照 | 更完整的整机健康覆盖待接入；电池电量与充电状态来源待确认 |
-| `motion` | 站起/坐下、电机使能/失能、profile查询/切换、外部逐关节控制、停止、急停/复位、显式恢复、会话控制权管理、权限快照、身体状态与事件、底层控制查询、SLAM速度/里程计、受控遥操作 | 里程计与默认速度源约10Hz；完整权限事件、Product运行模式公共接线、姿态/步态后端与现场运动验收待推进 |
+| `motion` | 站起/坐下、电机使能/失能、阻尼软急停（`BrainstemClient::damp`）、profile查询/切换、停止、急停/复位、显式恢复、会话控制权管理、权限快照、身体状态与事件、底层控制查询、SLAM速度/里程计、受控遥操作、`External` 逐关节外控（`BrainstemExternalClient` + Brainstem `v0.0.1` 服务端） | 里程计与默认速度源约10Hz；`5052` Gateway 完整权限事件、`v0.0.1` 真机包部署与安全窗口现场运动验收、姿态/步态后端待推进 |
 | `localization` | 位姿查询与流、接收年龄/新鲜度、类型化定位状态、WGS84 地理位置查询/1Hz流、重定位 | GNSS 保留源时间及无 fix/过期状态；真实 GNSS 与实机定位链待验收 |
 | `maps` | 地图列表、保存/加载、PCD 读取、保存栅格读取 | 真实地图、存取和设备内存表现待验收；实时栅格未提供 SDK 接口 |
 | `navigation` | 目标、任务状态/暂停/恢复/取消、路线查询与流 | 真实导航闭环待验收；路线缓存高度的兼容默认值需明确来源 |
@@ -250,4 +251,4 @@ DOSO导航目标、任务暂停/恢复/取消由`navigation`维护，地图建�
 
 当前 Brainstem 在缺少 walking lease 的 Grounded/Transitioning 状态下，底层 stop 可能返回 `lease_missing`。姿态请求 ACK 记录接纳，动作到位和物理停稳仍需后续身体状态与现场验证。
 
-公共Profile切换和内部自动切换共用执行方规则。Brainstem硬件服务要求Grounded、电机关闭和释放控制，内部自动切换由driver状态机管理准备及恢复电机阶段，仅恢复入口明确已使能且由本次流程关闭的输出门，入口已关闭时保持关闭。Recovery仍需接入独立会话与心跳生命周期，height、gait、damp需先补机器人端执行能力。各接口的设备动作与故障恢复继续现场验收。
+公共Profile切换和内部自动切换共用执行方规则。Brainstem硬件服务要求Grounded、电机关闭和释放控制，内部自动切换由driver状态机管理准备及恢复电机阶段，仅恢复入口明确已使能且由本次流程关闭的输出门，入口已关闭时保持关闭。Brainstem `v0.0.1` 已实装解析式 `Damp` 软急停与 Layer-2 `RobotExternalControl` 仲裁/SafetyGate（`RobotRecovery` 按配置关闭），height、gait 将待当前能力完成真机安全窗口验收后再评估接入。各接口的设备动作与故障恢复继续现场验收。

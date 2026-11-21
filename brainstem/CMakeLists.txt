@@ -32,6 +32,7 @@ set(BRAINSTEM_PROTO_FILES
     brainstem_api/common.proto
     brainstem_api/cms.proto
     brainstem_api/external.proto
+    brainstem_api/recovery.proto
 )
 
 set(BRAINSTEM_GENERATED_SOURCES
@@ -41,6 +42,8 @@ set(BRAINSTEM_GENERATED_SOURCES
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/cms.grpc.pb.cc"
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/external.pb.cc"
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/external.grpc.pb.cc"
+    "${BRAINSTEM_GENERATED_DIR}/brainstem_api/recovery.pb.cc"
+    "${BRAINSTEM_GENERATED_DIR}/brainstem_api/recovery.grpc.pb.cc"
 )
 
 set(BRAINSTEM_GENERATED_HEADERS
@@ -50,6 +53,8 @@ set(BRAINSTEM_GENERATED_HEADERS
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/cms.grpc.pb.h"
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/external.pb.h"
     "${BRAINSTEM_GENERATED_DIR}/brainstem_api/external.grpc.pb.h"
+    "${BRAINSTEM_GENERATED_DIR}/brainstem_api/recovery.pb.h"
+    "${BRAINSTEM_GENERATED_DIR}/brainstem_api/recovery.grpc.pb.h"
 )
 
 if(TARGET protobuf::protoc)
@@ -83,6 +88,7 @@ add_custom_command(
         "${BRAINSTEM_API_ROOT}/brainstem_api/common.proto"
         "${BRAINSTEM_API_ROOT}/brainstem_api/cms.proto"
         "${BRAINSTEM_API_ROOT}/brainstem_api/external.proto"
+        "${BRAINSTEM_API_ROOT}/brainstem_api/recovery.proto"
     COMMENT "Generating Brainstem gRPC client sources"
     VERBATIM
 )

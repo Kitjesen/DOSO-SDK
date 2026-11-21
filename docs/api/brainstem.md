@@ -31,10 +31,13 @@ let status = robot.control_status().await?;
 | 方法 | 返回 |
 | --- | --- |
 | `control_status()` | 身体状态、输出门、控制权和租约状态 |
-| `profile()` | 当前 Profile 与可用 Profile |
+| `cms_state()` | 当前 `CmsState`（状态、过渡动作和动作名称） |
+| `profile()` | 当前 Profile、可用列表及 `2.3` 模式能力（`mode_capabilities` / `active_mode_id`） |
+| `list_gestures()` | 机端可用预设动作列表及预计时长 |
 | `voltage()` | 各电机母线电压 |
 | `motor_status()` | 电机在线、温度、位置、速度、力矩和故障 |
-| `speed_mode()` | 当前速度模式 |
+| `speed_mode()` | 当前速度模式（未实现：机端当前返回 `UNIMPLEMENTED`） |
+| `listen_cms_state()` | `CmsState` 状态变更服务端流 |
 | `listen_imu()` | IMU 服务端流 |
 | `listen_joint()` | 关节服务端流 |
 
@@ -47,9 +50,11 @@ let status = robot.control_status().await?;
 | `release_control(token)` | 释放租约 |
 | `enable_motors()` / `disable_motors()` | 电机输出门操作 |
 | `stand_up()` / `sit_down()` | 姿态动作 |
+| `damp()` | 触发解析式阻尼软急停（`Damp`），100ms 斜坡切入纯阻尼并在静止后收敛至 `Grounded` |
+| `play_gesture(name)` | 播放机端预设动作（非空名称校验；需站立态） |
 | `walk_checked(token, sequence, direction)` | 带租约和序号的机身速度命令 |
 | `switch_profile(name)` | 切换内置 Profile |
-| `set_speed_mode(mode)` | 设置速度模式 |
+| `set_speed_mode(mode)` | 设置速度模式（未实现：机端当前返回 `UNIMPLEMENTED`） |
 | `clear_motor_fault(joint_ids)` | 清除指定或全部电机故障 |
 | `set_zero()` | 在 Brainstem 允许时保存当前位置零点 |
 
@@ -59,17 +64,20 @@ let status = robot.control_status().await?;
 
 `robot.external()` 返回同一 Brainstem 连接上的 `BrainstemExternalClient`。它提供 `enter`、`enable`、`heartbeat`、`control`、`disable`、`exit` 和 `status`，用于客户自己的逐关节策略。进入 External 前必须由 Brainstem 接纳会话，帧流断开后 SDK 不重放旧帧。
 
-当前真机的 External 和 Recovery 是否已部署，仍以现场 RPC 验收为准。SDK 不创建 Recovery 空接口。
+> [!NOTE]
+> **v0.0.1 服务状态**：`RobotExternalControl` 已接入 Brainstem `v0.0.1` 双层策略内核（[HardwareExternal](../../../brainstem/thunder/lib/src/external/hardware_external.dart) + [RealJoint SafetyGate](../../../brainstem/thunder/lib/src/real_joint.dart)，待部署至 `THUNDER-DEV-001` 并完成真机安全窗口验收）；`RobotRecovery` 仍通过 `brainstem.env` 关闭（`THUNDER_RECOVERY_MODEL_CONFIG` 未设置），在未验收前不挂载。
 
 ## 只读稳定性测试
 
 使用 `measure_brainstem` 做固定窗口验收：
 
 ```powershell
-cargo run --release --example measure_brainstem -- https://thunder-01.local:13145 900 10
+cargo run --release --example measure_brainstem -- https://thunder-01.local:13145 900 10 [out_dir]
 ```
 
-默认窗口为 900 秒。程序订阅 IMU 和关节流，每 10 秒查询控制状态、Profile、电压和电机状态。IMU 和 16 轴分别统计接收空窗与机端消息时间戳间隔。频率要求 98–102 Hz、空窗最多 2 秒，查询失败、流提前结束、缺轴或数据异常均返回非零退出码。
+默认窗口为 900 秒。程序订阅 IMU 和关节流，每 10 秒查询控制状态、Profile、电压和电机状态。IMU 和 16 轴分别统计接收空窗与机端单调时间戳间隔，并校验 IMU 角速度/四元数有限性与 `linear_acceleration`（m/s²）。频率要求 98–102 Hz、空窗最多 2 秒，查询失败、流提前结束、缺轴或数据异常（含缺失/非有限加速度）均返回非零退出码。
+
+指定第 4 个可选参数 `out_dir` 时，会在开始时写入 `meta.json`（含起止参数），每 60 秒向 `checkpoints.jsonl` 追加并落盘（`sync_data`）一行分段快照，结束时原子写入 `summary.json`，避免长稳测试期间开发机意外重启丢失全部进度。
 
 需要单独测量传感器流时，将查询间隔设为 `0`：
 
@@ -81,4 +89,4 @@ cargo run --release --example measure_brainstem -- https://thunder-01.local:1314
 
 ## 原生协议中暂未封装的方法
 
-`brainstem.api.v1` 还定义了仿真步进、历史帧、身体状态事件、模型参数、预设动作和速度模式之外的诊断方法。当前 Rust 客户端暂未为以下 RPC 提供便捷方法：`Walk`、`Tick`、`Step`、`GetStartTime`、`GetCmsState`、`ListenHistory`、`ListenCmsState`、`GetParams`、`PlayGesture` 和 `ListGestures`。生成的原生客户端仍可通过 `brainstem::rpc` 访问这些类型，正式封装前需要先确认真机服务实现和安全语义。
+`brainstem.api.v1` 还定义了仿真步进、历史帧、模型参数等方法，以及 `RobotRecovery` 服务。当前 Rust 客户端暂未为以下 RPC 提供便捷方法：`Walk`、`Tick`、`Step`、`GetStartTime`、`ListenHistory`、`GetParams` 以及 `RobotRecovery`。生成的原生客户端仍可通过 `brainstem::rpc` 访问这些类型，正式封装前需要先确认真机服务实现和安全语义。

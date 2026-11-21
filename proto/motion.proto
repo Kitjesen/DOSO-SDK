@@ -10,8 +10,12 @@ service Motion {
   rpc ExternalControl(stream ExternalControlRequest) returns (stream ExternalControlReply);
   rpc StandUp(Command) returns (Receipt);
   rpc SitDown(Command) returns (Receipt);
+  rpc Damp(Command) returns (Receipt);
   rpc EnableMotors(Command) returns (Receipt);
   rpc DisableMotors(Command) returns (Receipt);
+  rpc ClearMotorFault(ClearMotorFaultRequest) returns (Receipt);
+  rpc ListGestures(Empty) returns (GestureList);
+  rpc PlayGesture(PlayGestureRequest) returns (Receipt);
   rpc Profile(Empty) returns (ProfileInfo);
   rpc SwitchProfile(SwitchProfileRequest) returns (Receipt);
   rpc Stop(Command) returns (Receipt);

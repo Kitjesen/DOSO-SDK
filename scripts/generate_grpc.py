@@ -71,11 +71,16 @@ def main():
         ],
         check=True,
     )
-    bindings = target / "brainstem_api/cms_pb2.py"
-    bindings.write_text(
-        bindings.read_text(encoding="utf-8").replace("from brainstem_api import common_pb2", "from . import common_pb2"),
-        encoding="utf-8",
-    )
+    for bindings in (target / "brainstem_api").glob("*_pb2*.py"):
+        bindings.write_text(
+            re.sub(
+                r"^from brainstem_api import ",
+                "from . import ",
+                bindings.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            ),
+            encoding="utf-8",
+        )
     for package in (target, target / "brainstem_api"):
         (package / "__init__.py").write_text(
             '"""Generated Brainstem protocol bindings; do not edit by hand."""\n', encoding="utf-8"

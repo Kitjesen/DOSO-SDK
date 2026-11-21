@@ -64,8 +64,9 @@ impl<'a> Motion<'a> {
             })
             .await
             .map_err(|_| Error::protocol("external request stream closed"))?;
+        let channel = self.0.low_level_channel().await?;
         let mut replies = tokio::time::timeout(self.0.timeout, async {
-            rpc::motion_client::MotionClient::new(self.0.channel.clone())
+            rpc::motion_client::MotionClient::new(channel)
                 .external_control(self.0.stream_request(ReceiverStream::new(receiver)))
                 .await
                 .map(|response| response.into_inner())
@@ -359,4 +360,39 @@ fn timeout(id: &str) -> Error {
         "external reply timed out; command acceptance is unknown",
     )
     .request(id)
+}
+
+impl rpc::JointCommand {
+    /// Position-PD leg command (`dq = 0`, `tau = 0`).
+    pub fn leg_pd(q: f64, kp: f64, kd: f64) -> Self {
+        Self {
+            q,
+            dq: 0.0,
+            kp,
+            kd,
+            tau: 0.0,
+        }
+    }
+
+    /// Wheel-foot velocity command (`q = 0`, `kp = 0`, `tau = 0`, matching Unitree Go2-W RL).
+    pub fn wheel_vel(dq: f64, kd: f64) -> Self {
+        Self {
+            q: 0.0,
+            dq,
+            kp: 0.0,
+            kd,
+            tau: 0.0,
+        }
+    }
+
+    /// Analytic damping command (`q = 0`, `dq = 0`, `kp = 0`, `tau = 0`).
+    pub fn damping(kd: f64) -> Self {
+        Self {
+            q: 0.0,
+            dq: 0.0,
+            kp: 0.0,
+            kd,
+            tau: 0.0,
+        }
+    }
 }

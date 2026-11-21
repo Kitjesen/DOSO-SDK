@@ -16,10 +16,11 @@ doso-cloud-link → Brainstem :13146 → GetControlStatus（只读）
 
 `BrainstemClient` 暴露 Brainstem 原生 `brainstem.api.v1` 合同，包含：
 
-- 控制状态、Profile、电机状态和电机母线电压
-- IMU 与关节持续流
-- 控制权租约、站起、坐下、50Hz 速度命令
-- 电机使能/禁用、Profile 和速度模式切换
+- 控制状态、`cms_state()`、`listen_cms_state()`、Profile（含 `mode_capabilities` / `active_mode_id`）、电机状态和电机母线电压
+- 机端预设动作查询 `list_gestures()` 与播放 `play_gesture(name)`
+- IMU（角速度 `rad/s`、四元数、体坐标系 `linear_acceleration` `m/s²`、单调时钟）与关节持续流
+- 控制权租约、站起、坐下、解析式阻尼软急停 `damp()`、50Hz 速度命令
+- 电机使能/禁用、Profile 切换
 - 清除电机故障、电机清零
 
 ```rust,no_run
@@ -42,9 +43,9 @@ async fn motion(robot: &BrainstemClient) -> doso_sdk::Result<()> {
 
 `release_control` 只释放租约，不代替停止命令。持续遥操作应由调用方按 20ms 周期提交递增序号，并在结束前发送零速度、检查回执，再释放租约。
 
-### External 逐关节控制
+### External 逐关节控制（Layer-2 客户策略入口）
 
-`robot.external()` 返回同一 `13145` 连接上的 `BrainstemExternalClient`。它提供 `enter`、`enable`、`control` 双向流、`heartbeat`、`disable`、`exit` 和 `status`。逐帧目标必须包含 16 个关节、递增 `sequence` 和 Brainstem 签发的 `input_window`。SDK 不自动重发或在断线后重放关节目标；断线时由 Brainstem 的输出期限和安全门接管。
+`robot.external()` 返回同一连接上的 `BrainstemExternalClient`（`enter`、`enable`、`control` 双向流、`heartbeat`、`disable`、`exit` 与 `status`）。在 Brainstem `v0.0.1` 两层策略架构中，`:13145` 已挂载 `RobotExternalControl`（`ExternalService` → `ExternalRuntime` → `HardwareExternal` → `RealJoint` 5 项 MIT `SafetyGate`），与内置策略互斥并接受 `YUNZHUO` 物理优先抢占及 `Disable`/`Damp` 瞬时中断。SDK 不自动重发或在断线后重放关节目标。真机上线需随 `v0.0.1` 发布包部署并完成安全窗口实机验收。
 
 客户端只调用 Brainstem 的 gRPC 服务，不打开 CAN、不访问串口，也不维护第二份电机状态。控制命令仍受 Brainstem 的租约、状态机和安全输出限制。
 

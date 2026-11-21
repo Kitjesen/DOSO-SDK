@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
   if (argc < 4) {
     std::cerr << "usage: " << argv[0]
               << " <host:port> <client_id>"
-                 " <enable|disable|set-zero|clear-faults|clear-faults:2,15|stand-up|sit-down>"
+                 " <enable|disable|set-zero|clear-faults|clear-faults:2,15|stand-up|sit-down|damp>"
                  " [<ca.pem> <client.crt> <client.key> [<server_name>]]\n";
     return 64;
   }
@@ -89,6 +89,8 @@ int main(int argc, char **argv) {
       result = client.standUp();
     } else if (command == "sit-down") {
       result = client.sitDown();
+    } else if (command == "damp") {
+      result = client.damp();
     } else if (command == "clear-faults" || command.rfind("clear-faults:", 0) == 0) {
       result = client.clearMotorFaults(parseJointIds(command));
     } else {

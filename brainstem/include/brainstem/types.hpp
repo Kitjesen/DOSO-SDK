@@ -77,6 +77,7 @@ enum class BodyStateKind {
   Grounded,
   Standing,
   Walking,
+  Damping,
   Transitioning,
 };
 

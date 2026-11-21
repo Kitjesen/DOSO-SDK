@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package brainstem.api.v1;
+
+// Current live contract used by Brainstem and the DOSO App.
+// Recovery is not a locomotion SwitchProfile request.
+service RobotRecovery {
+  // Selecting recovery does not enable motors. Heartbeat every 100 ms; expiry is 300 ms.
+  rpc Enter(RecoveryStartRequest) returns (RecoveryStatus);
+  rpc Enable(RecoverySessionRequest) returns (RecoveryStatus);
+  rpc Heartbeat(RecoverySessionRequest) returns (RecoveryStatus);
+  rpc Exit(RecoverySessionRequest) returns (RecoveryStatus);
+  rpc GetStatus(google.protobuf.Empty) returns (RecoveryStatus);
+  rpc Start(RecoveryStartRequest) returns (RecoveryActionReply);
+  rpc Cancel(RecoveryCancelRequest) returns (RecoveryActionReply);
+}
+
+enum RobotModeKind {
+  ROBOT_MODE_KIND_UNKNOWN = 0;
+  ROBOT_MODE_KIND_LOCOMOTION_PROFILE = 1;
+  ROBOT_MODE_KIND_RECOVERY_ACTION = 2;
+}
+
+enum RobotModeAvailability {
+  ROBOT_MODE_AVAILABILITY_UNKNOWN = 0;
+  ROBOT_MODE_AVAILABILITY_UNAVAILABLE = 1;
+  ROBOT_MODE_AVAILABILITY_AVAILABLE = 2;
+}
+
+message RobotModeCapability {
+  // Stable operator key: flat, stairs, platform or recovery.
+  string id = 1;
+  RobotModeKind kind = 2;
+  RobotModeAvailability availability = 3;
+  // Actual profile ID only for locomotion; empty for recovery.
+  string profile_id = 4;
+  string unavailable_reason = 5;
+}
+
+enum RecoveryPhase {
+  RECOVERY_PHASE_UNKNOWN = 0;
+  RECOVERY_PHASE_DISABLED = 1;
+  RECOVERY_PHASE_PREPARING = 2;
+  RECOVERY_PHASE_WAITING = 3;
+  RECOVERY_PHASE_RECOVERING = 4;
+  RECOVERY_PHASE_BALANCED = 5;
+  RECOVERY_PHASE_LOWERING = 6;
+  RECOVERY_PHASE_PRONE_HOLD = 7;
+  RECOVERY_PHASE_STAND_UP = 8;
+  RECOVERY_PHASE_STANDING = 9;
+  RECOVERY_PHASE_SIT_DOWN = 10;
+  RECOVERY_PHASE_GROUNDED = 11;
+  RECOVERY_PHASE_FAILED = 12;
+}
+
+message RecoveryStatus {
+  RobotModeAvailability availability = 1;
+  RecoveryPhase phase = 2;
+  // Empty if no operation is known. Not an indication of physical completion.
+  string operation_id = 3;
+  string unavailable_reason = 4;
+  bool selected = 5;
+  string session_token = 6;
+  // Motor status acknowledgement only; not proof that the body has stopped moving.
+  bool motor_disable_confirmed = 7;
+}
+
+message RecoverySessionRequest { string session_token = 1; }
+
+message RecoveryStartRequest {
+  // Unique per intended action, scoped to authenticated operator and session.
+  string operation_id = 1;
+  string session_token = 2;
+}
+
+message RecoveryCancelRequest {
+  // Refers to the original action; never creates a new recovery action.
+  string operation_id = 1;
+  string session_token = 2;
+}
+
+enum RecoveryActionDecision {
+  RECOVERY_ACTION_DECISION_UNKNOWN = 0;
+  RECOVERY_ACTION_DECISION_ACCEPTED = 1;
+  RECOVERY_ACTION_DECISION_REJECTED = 2;
+}
+
+message RecoveryActionReply {
+  string operation_id = 1;
+  RecoveryActionDecision decision = 2;
+  RecoveryPhase phase = 3;
+  // An accepted request is not physical completion or confirmed stopping.
+  string reason = 4;
+}

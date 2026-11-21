@@ -1,6 +1,6 @@
 # 功能清单与验收状态
 
-更新：2026-11-17。本页是功能进度的统一入口；方法签名由 [API 手册](api/README.md) 维护，消息字段由 [proto/messages](../proto/messages/) 定义，运行命令与最近测试结果见 [TESTING.md](../TESTING.md)。新增功能时同步这三处，不再另建平行清单。
+更新于 2026-11-20。本页是功能进度的统一入口。方法签名由 [API 手册](api/README.md) 维护，消息字段由 [proto/messages](../proto/messages/) 定义，运行命令与最近测试结果见 [TESTING.md](../TESTING.md)。新增功能时同步这三处。
 
 “本地已测”表示真实 Rust/gRPC 或 Python 服务边界使用测试源通过相应检查，不表示机器人动作通过。下面逐项区分已有代码、数据/执行责任方和现场证据。未列现场通过的功能均未完成真机验收。
 
@@ -10,7 +10,7 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 
 | 入口 | 已覆盖 | 当前状态 |
 | --- | --- | --- |
-| `BrainstemClient` | 控制状态、Profile、电压、电机状态、IMU/关节流、租约、站坐、速度、External | SDK 已实现；2026-11-18 通过真机只读状态/电压/电机复核，控制动作和 External 仍待现场验收 |
+| `BrainstemClient` | 控制状态、Profile、电压、电机状态、IMU/关节流、租约、站坐、阻尼软急停 (`damp`)、速度、`External` 逐关节外控 | 2026-11-20 通过 5 GHz 真机系统状态读取、15 分钟并发观测与 IMU 校准验收；`v0.0.1` `External` 服务与仲裁/SafetyGate 已完成本地闭环单测，待随 `v0.0.1` 上机并完成控制动作安全窗口验收 |
 | `DosoClient` | 七域高层协议 | 本地合同已测；机器狗 `5052` 未部署，不计入当前真机入口 |
 
 ## 连接与公共合同
@@ -21,7 +21,7 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 | 显式重新连接和握手 | `reconnect(&mut self)`；[实现](../src/client/mod.rs) | 原 Endpoint、同一凭据和 TLS 配置 | 本地检查新 TCP、刷新身份、失败保留旧快照；已知 UUID 改变/消失拒绝。既有流由应用重建，不重放命令、不自动申请控制 |
 | 凭据与加密 | `Config.api_key`、`tls_ca_certificate` | gRPC metadata、系统根/私有 CA、机器人 listener | 本地已测鉴权与 TLS；设备正式证书/ACL 和正式端点部署未验收 |
 | 错误、回执、未知提交 | [Error/Receipt 合同](results.md) | 原业务 owner 与 SDK | 本地已测请求身份、标准码、结构化原因、终态和应答丢失；接纳不等于动作完成 |
-| 订阅生命周期 | `watch_*`、Teleop、ExternalControl | 服务共享最多 8 个长流名额 | 本地已测取消、源错误、断流和额度释放；IMU/关节只有 60 秒端到端现场记录，长稳未通过验收 |
+| 订阅生命周期 | `watch_*`、Teleop、ExternalControl | 服务共享最多 8 个长流名额 | 本地已测取消、源错误、断流和额度释放。Brainstem 直连 IMU 和关节的 15 分钟真机结果见[观测流验收](REAL_ROBOT_ACCEPTANCE_MATRIX.md#3-imu关节-100hz状态查询和电压) |
 
 ## system
 
@@ -52,9 +52,9 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 | 停止、急停、复位与恢复 | `stop`、`emergency_stop`、`clear_emergency_stop`、`resume` | 原安全链与 native owner | 本地已测；`resume` 是恢复接收新命令，不是摔倒自恢复。Grounded/Transitioning 无 walking lease 时 stop 仍可能 `lease_missing`，物理停稳未验收 |
 | 身体、电机与运动状态 | `body_state`、`watch_body_state`、`control_status`、`status`、`watch_state[_at]` | Brainstem 只读源、Gateway 状态投影 | 本地已测；身体为源事件，运动缓存目标 1–100Hz，不代表传感器新样本 |
 | 速度与里程计 | `velocity`、`watch_velocity`、`odometry`、`watch_odometry` | SLAM/定位里程计缓存 | 本地映射、坐标与缺失已测；里程计 **10Hz**，速度高频流可重复约 10Hz 源样本 |
-| Builtin/External 接管 | `controller`、`external_control`；`publish_joints`、`enable`、`disable`、`close` | native → driver → Brainstem RobotExternalControl | 本地会话与目标等已测；11月17日真机 `RobotExternalControl.GetStatus` 返回 UNIMPLEMENTED，当前运行制品缺该入口，接管和硬件输出待验收 |
+| Builtin/External 接管 | `controller`、`external_control`（SDK/Brainstem 双层策略内核） | `Brainstem` `RobotExternalControl` (`v0.0.1`) + `RealJoint` 5 项 MIT `SafetyGate` | **服务端已实装并完成本地单测，待真机部署与实机验收**。`v0.0.1` 在 `:13145` 挂载 `RobotExternalControl`，共享唯一 `RealJoint`/`RealImu`/`ControlArbiter`，受内置互斥、`YUNZHUO` 物理抢占与 `Disable`/`Damp` 瞬时切断保护 |
 | Euler、站高、步态、速度档位 | 尚无公开整机 API | 需 Brainstem/driver 实际执行能力与范围 | **未实现**。Brainstem Set/GetSpeedMode 当前返回 UNIMPLEMENTED；未生成空壳成功接口 |
-| 摔倒恢复、阻尼 | 尚无完整整机 API | driver 当前不支持；Brainstem Recovery 有独立受控会话源码候选 | **未接通**。11月17日真机 `RobotRecovery.GetStatus` 返回 UNIMPLEMENTED；需贯通 native/driver 会话、心跳、中断和 SDK，并部署匹配制品 |
+| 阻尼软急停与摔倒恢复 | Brainstem/SDK 已接入 `damp()`（`v0.0.1`）；`RobotRecovery` 已关闭 | Brainstem `Damp`（100ms 斜坡泄力至 `Grounded`）；LingTu `doso.cpp` `BodyAction::Damp` 已联调通过；`Recovery` 未启用 | **阻尼就绪待实机动作验收；Recovery 已关闭**。`brainstem.env` 已显式禁用半成品 `THUNDER_RECOVERY_MODEL_CONFIG`，`:13145` 不挂载 `RobotRecovery` |
 
 ## localization
 
@@ -101,7 +101,7 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 
 | 功能 | API | 实际来源 | 验证与限制 |
 | --- | --- | --- | --- |
-| IMU 源事件 | `listen_imu` | Brainstem ListenImu | 已读到角速度和四元数，线加速度缺失。连续交付见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md) |
+| IMU 源事件 | `listen_imu` | Brainstem ListenImu | 已校准为机体系角速度 `rad/s`、体坐标系 `linear_acceleration`（`m/s²`，约 `9.8 m/s²`）、四元数及单调时钟，由 `measure_brainstem` 逐帧校验。连续交付见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md) |
 | 单关节/整帧事件 | `listen_joint` | Brainstem ListenJoint | 16 轴已读通，逐轴长稳结果见[真机验收第 3 项](REAL_ROBOT_ACCEPTANCE_MATRIX.md)。索引见[关节编号](api/observations.md#doso-thunder-16-轴编号) |
 | 电机状态、温度、原始错误 | `motors` | Brainstem GetMotorState | 本地字段与错误已测；无统一有效位和采样时间，离线默认值不证明健康 |
 | 电机母线电压 | `voltage` | Brainstem `GetVoltage`，CAN 参数查询 | 16 路静态及 15 分钟并发周期查询均已实测；各窗口结果见[测试记录](../TESTING.md) |
@@ -132,14 +132,14 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 | Rust 交付 | GitHub `rust` 分支、Cargo Git/path 依赖、Linux/Windows CI、打包验证、API/示例 | 正式 V1、客户独立接入、命名型号兼容表 |
 | Android | 独立 Rust bridge、host 合同测试 | APK/手机实装、真实相机/点云渲染与性能 |
 | 研发机身份 | THUNDER-DEV-001；永久 UUID `d82a831a-2e86-4b46-975b-3d42473583b7` 已登记并写入配置 | 正式 Gateway 三项身份读回、固件统一发布；不等于已绑定客户或开启云 |
-| 正式机端链路 | Brainstem `13145` 直连 SDK 已有客户端和只读历史证据 | Rust SDK 直连控制动作、External 的现场验收；`5052` Gateway 不属于当前 V1 前置条件 |
+| 正式机端链路 | Brainstem `13145` 直连 SDK 已有客户端和只读历史证据 | Rust/C++ SDK 直连控制动作（站/坐/走/`damp`）的现场安全验收；`5052` Gateway 与 `External`/`Recovery` 不属于当前收敛交付范围 |
 | 云端 | SDK 本地 Teleop；robot-cloud 用户授权会话在机端桥接进入同一 Teleop | Claim/Hold/Release 本地闭环已通过；线上 Gateway、真机持权、速度载荷、许可/断云与公网视频按 [robot-cloud 进度](D:/DOSO/robot-cloud/PROGRESS.md)验收 |
 
 现场历史事实及失败原因保留在 [TESTING.md](../TESTING.md#现场记录)，不把新源码、本地测试或短时连续读取写成整机已交付。
 
 ## 下一步验收顺序
 
-1. 在允许变更现场运行时后，安装正式机端服务，验证三项身份、权限/证书、只读源及断连重建；先做 15 分钟 IMU/关节并发长稳。
-2. 在具备现场动作条件时，分别验收站坐、电机门、50Hz 遥操作、失权/断线停止，再验收 External 接管。已接纳姿态的中断能力必须由底层解决。
+1. 在已通过的 5 GHz 直连基线上，把并发观测扩到 1 小时。正式机端三项身份、权限与证书、断连重建分别验收。
+2. 在具备现场动作条件时，分别验收站坐、电机门、50Hz 遥操作、失权/断线停止与 `damp()` 柔顺泄力阻尼。已接纳姿态的中断能力由底层确认。
 3. 用真实地图验收保存/加载/重定位、预览/到点/限速、暂停/恢复/取消和巡检，逐项记录原任务身份与物理停止。
-4. 电源电压沿用现有电机母线接口。光照、外设/灯光和充电桩按设备协议接入；姿态/步态、Recovery/阻尼补齐真实执行链。
+4. 电源电压沿用现有电机母线接口。光照、外设/灯光和充电桩按设备协议接入；`External` 随 `v0.0.1` 在本地完成闭环验证后进入安全窗口实机验收，姿态/步态与 `Recovery` 按后续计划单独评估。

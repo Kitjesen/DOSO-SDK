@@ -1,0 +1,42 @@
+# DOSO Thunder 16-DOF Wheeled Quadruped Sim2Real Deployment Config
+# Canonical DOSO hardware joint order (0..15):
+#  0..2 : FR_hip, FR_thigh, FR_calf
+#  3..5 : FL_hip, FL_thigh, FL_calf
+#  6..8 : RR_hip, RR_thigh, RR_calf
+#  9..11: RL_hip, RL_thigh, RL_calf
+# 12..15: FR_foot, FL_foot, RR_foot, RL_foot (velocity wheels: kp = 0.0)
+
+policy_path: ../../../../brainstem/onnx_runtime/example/policy.onnx
+step_dt: 0.02
+
+joint_ids_map:
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+default_joint_pos:
+  [0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.0, 0.0, 0.0]
+
+stiffness:
+  [35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 0.0, 0.0, 0.0, 0.0]
+
+damping:
+  [1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 0.6, 0.6, 0.6, 0.6]
+
+action_scale:
+  [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 5.0, 5.0, 5.0, 5.0]
+
+action_clip: 10.0
+wheel_indices: [12, 13, 14, 15]
+
+obs_scales:
+  lin_vel: 2.0
+  ang_vel: 0.25
+  dof_pos: 1.0
+  dof_vel: 0.05
+
+history_length: 1
+fix_stand_duration_s: 2.0
+max_tilt_cos: 0.5
+max_telemetry_age_ms: 150.0
+cmd_max_vx: 1.5
+cmd_max_vy: 0.8
+cmd_max_wz: 1.5
