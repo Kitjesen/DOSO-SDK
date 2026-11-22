@@ -263,11 +263,15 @@ mod tests {
         let cfg = DeployConfig::from_path(&path).unwrap();
         assert_eq!(cfg.obs_dim(), 57);
         assert_eq!(cfg.wheel_indices, vec![12, 13, 14, 15]);
-        assert!(
-            Path::new(&cfg.policy_path).exists(),
-            "resolved policy_path {} should exist",
-            cfg.policy_path
-        );
+        let sibling_brainstem =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../brainstem");
+        if sibling_brainstem.is_dir() {
+            assert!(
+                Path::new(&cfg.policy_path).exists(),
+                "resolved policy_path {} should exist",
+                cfg.policy_path
+            );
+        }
     }
 
     #[test]

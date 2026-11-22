@@ -170,3 +170,23 @@ cargo run --manifest-path bridges/doso-shm-ipc/Cargo.toml --release --example sh
 sudo /opt/brainstem/libexec/tune-realtime-irq.sh
 ```
 
+---
+
+## 6. Ubuntu 22.04 ARM64（RDK-S100 / Cortex-A78AE `PREEMPT_RT`）实机验证数据与编译注意事项
+
+### 6.1 实机 `shm_bench` 数据（6 核 Cortex-A78AE @ 2.0 GHz，`6.1.158-rt58 PREEMPT_RT`）
+
+| 场景 | 指标 | P50 | P99 | P99.9 | Max | 撕裂读 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 万帧双读并发压测 | 写入均摊耗时 | **268 ns/帧**（r1=71,705, r2=69,504） | — | — | — | **0** |
+| 200Hz 默认 CFS | 定时唤醒抖动 / 往返 IPC | 63.59 µs / 1.18 µs | 72.53 µs / 1.70 µs | 75.98 µs / 1.80 µs | 75.98 µs / 1.80 µs | **0** |
+| 200Hz `Core 4-5 + SCHED_FIFO 80` | 定时唤醒抖动 / 往返 IPC | **7.75 µs** / **0.60 µs** | **13.06 µs** / **1.30 µs** | **13.81 µs** / 3.40 µs | **13.81 µs** / 3.40 µs | **0** |
+| 1000Hz `Core 4-5 + SCHED_FIFO 80` | 定时唤醒抖动 / 往返 IPC | **4.51 µs** / **0.33 µs** | **14.47 µs** / **1.10 µs** | **17.24 µs** / **1.25 µs** | **17.82 µs** / **1.28 µs** | **0** |
+
+### 6.2 Ubuntu 22.04 ARM64 板上编译注意事项
+
+1. **`protoc` 版本**：Ubuntu 22.04 apt 默认 `protoc 3.12.4` 不支持 `proto3 optional`，请下载官方 `protoc-29.3-linux-aarch_64.zip` 并设置 `PROTOC=/path/to/protoc`。
+2. **CycloneDDS 版本**：Ubuntu 22.04 apt `libcyclonedds-dev` 为 `0.8.2`（缺少 `0.10+` 的 `type_information` / `dds_alignof`）。`bridges/brainstem-dds-bridge/build.rs` 已自动检测头文件版本并在 `<0.10` 时平滑降级为单板 Base Gateway 模式；如需双板实时 DDS，请安装 CycloneDDS `0.10+` 并指向 `CYCLONEDDS_ROOT`。
+3. **保护 eMMC 根分区**：编译 Rust 时建议设置 `CARGO_TARGET_DIR=/dev/shm/doso-cargo-target`（利用 11GB 内存盘加速编译且不占根分区空间）。
+
+

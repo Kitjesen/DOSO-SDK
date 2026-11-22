@@ -41,9 +41,26 @@ fn main() {
         candidates.push(PathBuf::from("/usr/local"));
     }
 
-    let sdk_root = candidates
-        .into_iter()
-        .find(|root| root.join("include/dds/dds.h").is_file());
+    let sdk_root = candidates.into_iter().find(|root| {
+        if !root.join("include/dds/dds.h").is_file() {
+            return false;
+        }
+        let has_type_info = std::fs::read_to_string(root.join("include/dds/ddsc/dds_public_impl.h"))
+            .map(|s| s.contains("type_information"))
+            .unwrap_or(false);
+        let has_alignof = std::fs::read_to_string(root.join("include/dds/ddsrt/align.h"))
+            .map(|s| s.contains("dds_alignof"))
+            .unwrap_or(false);
+        if has_type_info && has_alignof {
+            true
+        } else {
+            println!(
+                "cargo:warning=Skipping CycloneDDS at {} (legacy <0.10 headers lack type_information/dds_alignof; install CycloneDDS 0.10+ or set CYCLONEDDS_ROOT)",
+                root.display()
+            );
+            false
+        }
+    });
 
     let Some(sdk_root) = sdk_root else {
         println!(

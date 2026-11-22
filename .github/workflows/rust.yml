@@ -37,5 +37,23 @@ jobs:
       - name: Test Android Rust bridge on host
         run: cargo test --manifest-path android/Cargo.toml --locked
 
+      - name: Test POSIX/Win32 SHM IPC crate
+        run: |
+          cargo clippy --manifest-path bridges/doso-shm-ipc/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path bridges/doso-shm-ipc/Cargo.toml
+
+      - name: Test Board-A Base Gateway & DDS bridge
+        run: |
+          cargo clippy --manifest-path bridges/brainstem-dds-bridge/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path bridges/brainstem-dds-bridge/Cargo.toml -- --test-threads=1
+
+      - name: Test ONNX RL runner (including direct SHM loop)
+        run: |
+          cargo clippy --manifest-path rl/doso-rl-runner/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path rl/doso-rl-runner/Cargo.toml -- --test-threads=1
+
+      - name: Build C/Python FFI shared library
+        run: cargo build --manifest-path ffi/Cargo.toml
+
       - name: Verify crate package
         run: cargo package -p doso-sdk --allow-dirty --locked
