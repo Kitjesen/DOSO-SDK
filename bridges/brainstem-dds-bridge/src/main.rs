@@ -73,6 +73,27 @@ struct Args {
 
     #[arg(long, env = "BRAINSTEM_DDS_WATCHDOG_MS", default_value_t = 200)]
     watchdog_ms: u64,
+
+    #[arg(
+        long,
+        env = "DOSO_SHM_IPC_ENABLED",
+        action = ArgAction::Set,
+        default_value_t = false
+    )]
+    shm_enabled: bool,
+
+    #[arg(
+        long,
+        env = "DOSO_SHM_PROPRIO_NAME",
+        default_value = "/doso_proprio_v1"
+    )]
+    shm_proprio_name: String,
+
+    #[arg(long, env = "DOSO_SHM_CMD_NAME", default_value = "/doso_ext_cmd_v1")]
+    shm_cmd_name: String,
+
+    #[arg(long, env = "DOSO_SHM_POLL_HZ", default_value_t = 200.0)]
+    shm_poll_hz: f64,
 }
 
 fn gateway_enabled(raw: &str) -> bool {
@@ -104,6 +125,8 @@ async fn main() -> Result<()> {
 
     let mut handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
 
+    let shm_poll_period = Duration::from_secs_f64(1.0 / args.shm_poll_hz.clamp(20.0, 1000.0));
+
     if gw_enabled {
         let gw_cfg = BaseGatewayConfig {
             brainstem_endpoint: args.brainstem_endpoint.clone(),
@@ -115,10 +138,15 @@ async fn main() -> Result<()> {
             api_key: args.api_key.clone(),
             low_level_endpoint_override: None,
             teleop_watchdog: Duration::from_millis(args.watchdog_ms.max(100)),
+            shm_enabled: args.shm_enabled,
+            shm_proprio_name: args.shm_proprio_name.clone(),
+            shm_cmd_name: args.shm_cmd_name.clone(),
+            shm_poll_period,
         };
         tracing::info!(
             listen = %gw_cfg.listen_addr,
             brainstem = %gw_cfg.brainstem_endpoint,
+            shm_enabled = gw_cfg.shm_enabled,
             "starting Board-A doso.v1 Base Gateway"
         );
         handles.push(tokio::spawn(serve_base_gateway(gw_cfg, gw_stop_rx)));
@@ -145,11 +173,15 @@ async fn main() -> Result<()> {
                 cross_board_clock: args.cross_board_clock,
                 command_timeout: Duration::from_millis(args.watchdog_ms),
                 poll_period: Duration::from_secs_f64(1.0 / args.poll_hz.max(10.0)),
+                shm_enabled: args.shm_enabled,
+                shm_proprio_name: args.shm_proprio_name,
+                shm_poll_period,
                 ..BridgeConfig::default()
             };
             tracing::info!(
                 endpoint = %cfg.brainstem_endpoint,
                 domain_id = args.domain_id,
+                shm_enabled = cfg.shm_enabled,
                 "starting Board-A CycloneDDS bridge"
             );
             handles.push(tokio::spawn(
