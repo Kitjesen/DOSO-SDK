@@ -36,6 +36,19 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     skip_fix_stand: bool,
+
+    #[arg(long, env = "DOSO_SHM_IPC_ENABLED", default_value_t = false)]
+    shm_enabled: bool,
+
+    #[arg(
+        long,
+        env = "DOSO_SHM_PROPRIO_NAME",
+        default_value = "/doso_proprio_v1"
+    )]
+    shm_proprio_name: String,
+
+    #[arg(long, env = "DOSO_SHM_CMD_NAME", default_value = "/doso_ext_cmd_v1")]
+    shm_cmd_name: String,
 }
 
 #[tokio::main]
@@ -54,6 +67,9 @@ async fn main() -> Result<()> {
         target_cmd: [args.vx, args.vy, args.wz],
         max_steps: args.max_steps,
         skip_fix_stand: args.skip_fix_stand,
+        shm_enabled: args.shm_enabled,
+        shm_proprio_name: args.shm_proprio_name,
+        shm_cmd_name: args.shm_cmd_name,
         ..RunnerConfig::default()
     };
 
@@ -65,6 +81,18 @@ async fn main() -> Result<()> {
 
     let mut runner = RlRunner::new(runner_cfg, Box::new(backend))?;
     let report = runner.run(&robot, stop_rx).await?;
-    tracing::info!(?report, "doso-rl-runner finished cleanly");
+    tracing::info!(
+        mode = ?report.final_mode,
+        shm = report.shm_data_plane_active,
+        fix_stand_steps = report.fix_stand_steps,
+        policy_steps = report.policy_steps,
+        step_p50_us = report.step_latency_us.p50_us,
+        step_p99_us = report.step_latency_us.p99_us,
+        step_p999_us = report.step_latency_us.p999_us,
+        infer_p99_us = report.infer_latency_us.p99_us,
+        jitter_p99_us = report.tick_jitter_us.p99_us,
+        reason = %report.stop_reason,
+        "doso-rl-runner finished cleanly"
+    );
     Ok(())
 }

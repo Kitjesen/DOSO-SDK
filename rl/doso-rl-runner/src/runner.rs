@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use doso_sdk::{rpc, ExternalControl, JointCommand, RobotClient};
+use doso_shm_ipc::{DosoExternalCmdPayload, ExternalCmdWriter, ProprioRingReader};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -19,6 +20,45 @@ pub enum RunnerMode {
     SoftDamp,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatencyStats {
+    pub samples: usize,
+    pub p50_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub max_us: u64,
+}
+
+#[derive(Default)]
+struct LatencyRecorder {
+    samples_us: Vec<u64>,
+}
+
+impl LatencyRecorder {
+    fn record(&mut self, us: u64) {
+        self.samples_us.push(us);
+    }
+
+    fn summarize(&mut self) -> LatencyStats {
+        if self.samples_us.is_empty() {
+            return LatencyStats::default();
+        }
+        self.samples_us.sort_unstable();
+        let n = self.samples_us.len();
+        let at = |pct: f64| -> u64 {
+            let idx = (((n - 1) as f64) * pct).round() as usize;
+            self.samples_us[idx.min(n - 1)]
+        };
+        LatencyStats {
+            samples: n,
+            p50_us: at(0.50),
+            p99_us: at(0.99),
+            p999_us: at(0.999),
+            max_us: self.samples_us[n - 1],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub deploy: DeployConfig,
@@ -26,6 +66,9 @@ pub struct RunnerConfig {
     pub max_steps: Option<u64>,
     pub skip_fix_stand: bool,
     pub telemetry_wait_timeout: Duration,
+    pub shm_enabled: bool,
+    pub shm_proprio_name: String,
+    pub shm_cmd_name: String,
 }
 
 impl Default for RunnerConfig {
@@ -36,6 +79,9 @@ impl Default for RunnerConfig {
             max_steps: None,
             skip_fix_stand: false,
             telemetry_wait_timeout: Duration::from_secs(3),
+            shm_enabled: false,
+            shm_proprio_name: "/doso_proprio_v1".to_string(),
+            shm_cmd_name: "/doso_ext_cmd_v1".to_string(),
         }
     }
 }
@@ -47,6 +93,97 @@ pub struct RunnerReport {
     pub policy_steps: u64,
     pub damp_triggered: bool,
     pub stop_reason: String,
+    pub shm_data_plane_active: bool,
+    pub step_latency_us: LatencyStats,
+    pub infer_latency_us: LatencyStats,
+    pub tick_jitter_us: LatencyStats,
+}
+
+struct ShmDataPlane {
+    proprio_reader: ProprioRingReader,
+    cmd_writer: ExternalCmdWriter,
+    last_proprio_seq: u64,
+    cached_imu: ImuSnapshot,
+    cached_joints: JointsSnapshot,
+    cached_session_id: String,
+    cached_session_hash: u64,
+}
+
+impl ShmDataPlane {
+    fn try_open(proprio_name: &str, cmd_name: &str) -> Result<Self> {
+        let proprio_reader = ProprioRingReader::open(proprio_name)?;
+        let cmd_writer = ExternalCmdWriter::open(cmd_name)?;
+        Ok(Self {
+            proprio_reader,
+            cmd_writer,
+            last_proprio_seq: 0,
+            cached_imu: ImuSnapshot::default(),
+            cached_joints: JointsSnapshot::default(),
+            cached_session_id: String::new(),
+            cached_session_hash: 0,
+        })
+    }
+
+    fn poll_telemetry(&mut self) {
+        if let Some((seq, p)) = self.proprio_reader.read_latest(self.last_proprio_seq) {
+            self.last_proprio_seq = seq;
+            let now = Instant::now();
+            self.cached_imu = ImuSnapshot {
+                quat_wxyz: p.imu_quat_wxyz,
+                ang_vel: p.imu_gyro_rad_s,
+                received_at: Some(now),
+            };
+            self.cached_joints = JointsSnapshot {
+                q: p.joint_q,
+                dq: p.joint_dq,
+                seen_mask: u16::MAX,
+                received_at: Some(now),
+            };
+        }
+    }
+
+    fn read_fresh(
+        &mut self,
+        max_age_ms: f64,
+    ) -> std::result::Result<(ImuSnapshot, JointsSnapshot), String> {
+        self.poll_telemetry();
+        let Some(at) = self.cached_imu.received_at else {
+            return Err("SHM proprioception telemetry not received".to_string());
+        };
+        if at.elapsed().as_secs_f64() * 1000.0 > max_age_ms {
+            return Err("SHM proprioception telemetry stale".to_string());
+        }
+        Ok((self.cached_imu.clone(), self.cached_joints.clone()))
+    }
+
+    fn publish_commands(
+        &mut self,
+        ext: &mut ExternalControl<'_>,
+        cmds: &[JointCommand],
+    ) -> Result<()> {
+        ExternalControl::validate_joint_commands(cmds, NUM_JOINTS)?;
+        let (session_id, input_window, sequence) = ext.shm_frame_token()?;
+        if self.cached_session_id != session_id {
+            self.cached_session_hash = doso_shm_ipc::fnv1a_64(session_id.as_bytes());
+            self.cached_session_id = session_id;
+        }
+        let mut payload = DosoExternalCmdPayload {
+            session_id_hash: self.cached_session_hash,
+            input_window,
+            sequence,
+            monotonic_us: doso_shm_ipc::monotonic_us(),
+            ..Default::default()
+        };
+        for (i, j) in cmds.iter().enumerate() {
+            payload.q[i] = j.q;
+            payload.dq[i] = j.dq;
+            payload.kp[i] = j.kp;
+            payload.kd[i] = j.kd;
+            payload.tau[i] = j.tau;
+        }
+        self.cmd_writer.publish(&payload)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -121,22 +258,50 @@ impl RlRunner {
         robot: &RobotClient,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<RunnerReport> {
-        let imu_stream = robot.observations().watch_imu().await?;
-        let joint_stream = robot.observations().watch_joints().await?;
+        let mut shm_plane = if self.config.shm_enabled {
+            match ShmDataPlane::try_open(&self.config.shm_proprio_name, &self.config.shm_cmd_name) {
+                Ok(plane) => {
+                    tracing::info!(
+                        proprio = %self.config.shm_proprio_name,
+                        cmd = %self.config.shm_cmd_name,
+                        "doso-rl-runner using direct POSIX SHM zero-copy data plane (control plane stays on gRPC)"
+                    );
+                    Some(plane)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        proprio = %self.config.shm_proprio_name,
+                        cmd = %self.config.shm_cmd_name,
+                        error = %err,
+                        "POSIX SHM unavailable; falling back to gRPC telemetry and command streams"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let shm_active = shm_plane.is_some();
 
-        let (imu_tx, imu_rx) = watch::channel(ImuSnapshot::default());
-        let (joints_tx, joints_rx) = watch::channel(JointsSnapshot::default());
-
-        let _tasks = TaskAbortGuard(vec![
-            spawn_imu_watcher(imu_stream, imu_tx),
-            spawn_joint_watcher(joint_stream, joints_tx),
-        ]);
+        let (grpc_watches, _tasks) = if shm_active {
+            (None, TaskAbortGuard(Vec::new()))
+        } else {
+            let imu_stream = robot.observations().watch_imu().await?;
+            let joint_stream = robot.observations().watch_joints().await?;
+            let (imu_tx, imu_rx) = watch::channel(ImuSnapshot::default());
+            let (joints_tx, joints_rx) = watch::channel(JointsSnapshot::default());
+            let guard = TaskAbortGuard(vec![
+                spawn_imu_watcher(imu_stream, imu_tx),
+                spawn_joint_watcher(joint_stream, joints_tx),
+            ]);
+            (Some((imu_rx, joints_rx)), guard)
+        };
 
         let mut ext = robot.low_level(None).await?;
 
         let q_initial = match wait_for_initial_telemetry(
-            &imu_rx,
-            &joints_rx,
+            shm_plane.as_mut(),
+            grpc_watches.as_ref(),
             self.config.telemetry_wait_timeout,
             &mut shutdown,
         )
@@ -144,25 +309,34 @@ impl RlRunner {
         {
             Ok(q) => q,
             Err(reason) => {
-                safe_damp_and_close(Some(ext), robot, &self.config.deploy).await;
+                safe_damp_and_close(Some(ext), shm_plane.as_mut(), robot, &self.config.deploy)
+                    .await;
                 return Ok(RunnerReport {
                     final_mode: RunnerMode::SoftDamp,
                     fix_stand_steps: 0,
                     policy_steps: 0,
                     damp_triggered: true,
                     stop_reason: reason,
+                    shm_data_plane_active: shm_active,
+                    step_latency_us: LatencyStats::default(),
+                    infer_latency_us: LatencyStats::default(),
+                    tick_jitter_us: LatencyStats::default(),
                 });
             }
         };
 
         // Submit safe initial hold frame before enabling motor outputs.
         let initial_hold = interpolate_fix_stand(&q_initial, &self.config.deploy, 0.0);
-        if let Err(err) = ext.publish_joints(initial_hold, None) {
-            safe_damp_and_close(Some(ext), robot, &self.config.deploy).await;
-            return Err(err.into());
+        if let Err(err) = submit_commands(&mut ext, shm_plane.as_mut(), initial_hold) {
+            safe_damp_and_close(Some(ext), shm_plane.as_mut(), robot, &self.config.deploy).await;
+            return Err(err);
+        }
+        if shm_active {
+            // Allow on-board HardwareExternal 200Hz SHM poller to ingest the priming frame.
+            tokio::time::sleep(Duration::from_millis(15)).await;
         }
         if let Err(err) = ext.enable(None).await {
-            safe_damp_and_close(Some(ext), robot, &self.config.deploy).await;
+            safe_damp_and_close(Some(ext), shm_plane.as_mut(), robot, &self.config.deploy).await;
             return Err(err.into());
         }
 
@@ -175,11 +349,16 @@ impl RlRunner {
         let mut fix_stand_steps = 0_u64;
         let mut policy_steps = 0_u64;
         let mut last_action_policy = [0.0_f32; NUM_JOINTS];
+        let mut step_latency = LatencyRecorder::default();
+        let mut infer_latency = LatencyRecorder::default();
+        let mut tick_jitter = LatencyRecorder::default();
         self.obs_builder.reset();
 
         let step_dur = Duration::from_secs_f64(self.config.deploy.step_dt);
+        let nominal_step_us = step_dur.as_micros() as u64;
         let mut ticker = tokio::time::interval(step_dur);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut prev_tick_at: Option<Instant> = None;
 
         let mut ext_opt = Some(ext);
         let max_age_ms = self.config.deploy.max_telemetry_age_ms;
@@ -191,6 +370,13 @@ impl RlRunner {
                     break (true, "shutdown signal received".to_string());
                 }
                 _ = ticker.tick() => {
+                    let tick_start = Instant::now();
+                    if let Some(prev) = prev_tick_at {
+                        let actual_us = tick_start.saturating_duration_since(prev).as_micros() as u64;
+                        tick_jitter.record(actual_us.abs_diff(nominal_step_us));
+                    }
+                    prev_tick_at = Some(tick_start);
+
                     let Some(ext_ref) = ext_opt.as_mut() else {
                         mode = RunnerMode::SoftDamp;
                         break (true, "external session missing".to_string());
@@ -212,7 +398,11 @@ impl RlRunner {
                         break (true, "controller state stale or inactive".to_string());
                     }
 
-                    let (imu, joints) = match read_fresh_telemetry(&imu_rx, &joints_rx, max_age_ms) {
+                    let (imu, joints) = match read_fresh_telemetry(
+                        shm_plane.as_mut(),
+                        grpc_watches.as_ref(),
+                        max_age_ms,
+                    ) {
                         Ok(pair) => pair,
                         Err(reason) => {
                             mode = RunnerMode::SoftDamp;
@@ -251,10 +441,11 @@ impl RlRunner {
                                 / self.config.deploy.fix_stand_duration_s)
                                 .clamp(0.0, 1.0);
                             let cmds = interpolate_fix_stand(&q_initial, &self.config.deploy, alpha);
-                            if let Err(err) = ext_ref.publish_joints(cmds, None) {
+                            if let Err(err) = submit_commands(ext_ref, shm_plane.as_mut(), cmds) {
                                 mode = RunnerMode::SoftDamp;
                                 break (true, format!("FixStand publish failed: {err}"));
                             }
+                            step_latency.record(tick_start.elapsed().as_micros() as u64);
                             fix_stand_steps += 1;
                             if alpha >= 1.0 {
                                 mode = RunnerMode::VelocityPolicy;
@@ -280,6 +471,7 @@ impl RlRunner {
                                     break (true, format!("observation error: {err}"));
                                 }
                             };
+                            let infer_start = Instant::now();
                             let raw_action = match self.backend.infer(&obs) {
                                 Ok(a) => a,
                                 Err(err) => {
@@ -287,6 +479,7 @@ impl RlRunner {
                                     break (true, format!("inference error: {err}"));
                                 }
                             };
+                            infer_latency.record(infer_start.elapsed().as_micros() as u64);
                             let (clipped, cmds) =
                                 match policy_actions_to_joint_commands(&raw_action, &self.config.deploy) {
                                     Ok(pair) => pair,
@@ -295,10 +488,11 @@ impl RlRunner {
                                         break (true, format!("action safety error: {err}"));
                                     }
                                 };
-                            if let Err(err) = ext_ref.publish_joints(cmds, None) {
+                            if let Err(err) = submit_commands(ext_ref, shm_plane.as_mut(), cmds) {
                                 mode = RunnerMode::SoftDamp;
                                 break (true, format!("policy publish failed: {err}"));
                             }
+                            step_latency.record(tick_start.elapsed().as_micros() as u64);
                             last_action_policy = clipped;
                             policy_steps += 1;
                             if let Some(limit) = self.config.max_steps {
@@ -321,7 +515,13 @@ impl RlRunner {
             }
         };
 
-        safe_damp_and_close(ext_opt.take(), robot, &self.config.deploy).await;
+        safe_damp_and_close(
+            ext_opt.take(),
+            shm_plane.as_mut(),
+            robot,
+            &self.config.deploy,
+        )
+        .await;
 
         Ok(RunnerReport {
             final_mode: mode,
@@ -329,6 +529,10 @@ impl RlRunner {
             policy_steps,
             damp_triggered,
             stop_reason,
+            shm_data_plane_active: shm_active,
+            step_latency_us: step_latency.summarize(),
+            infer_latency_us: infer_latency.summarize(),
+            tick_jitter_us: tick_jitter.summarize(),
         })
     }
 }
@@ -368,11 +572,33 @@ fn interpolate_fix_stand(
         .collect()
 }
 
+fn submit_commands(
+    ext: &mut ExternalControl<'_>,
+    shm: Option<&mut ShmDataPlane>,
+    cmds: Vec<JointCommand>,
+) -> Result<()> {
+    if let Some(plane) = shm {
+        plane.publish_commands(ext, &cmds)
+    } else {
+        ext.publish_joints(cmds, None)?;
+        Ok(())
+    }
+}
+
 fn read_fresh_telemetry(
-    imu_rx: &watch::Receiver<ImuSnapshot>,
-    joints_rx: &watch::Receiver<JointsSnapshot>,
+    shm: Option<&mut ShmDataPlane>,
+    grpc: Option<&(
+        watch::Receiver<ImuSnapshot>,
+        watch::Receiver<JointsSnapshot>,
+    )>,
     max_age_ms: f64,
 ) -> std::result::Result<(ImuSnapshot, JointsSnapshot), String> {
+    if let Some(plane) = shm {
+        return plane.read_fresh(max_age_ms);
+    }
+    let Some((imu_rx, joints_rx)) = grpc else {
+        return Err("no telemetry source active".to_string());
+    };
     let imu = imu_rx.borrow().clone();
     let Some(imu_at) = imu.received_at else {
         return Err("IMU telemetry not received".to_string());
@@ -395,8 +621,11 @@ fn read_fresh_telemetry(
 }
 
 async fn wait_for_initial_telemetry(
-    imu_rx: &watch::Receiver<ImuSnapshot>,
-    joints_rx: &watch::Receiver<JointsSnapshot>,
+    mut shm: Option<&mut ShmDataPlane>,
+    grpc: Option<&(
+        watch::Receiver<ImuSnapshot>,
+        watch::Receiver<JointsSnapshot>,
+    )>,
     timeout: Duration,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> std::result::Result<[f64; NUM_JOINTS], String> {
@@ -405,7 +634,15 @@ async fn wait_for_initial_telemetry(
         if shutdown.try_recv().is_ok() {
             return Err("shutdown requested during initial telemetry wait".to_string());
         }
-        {
+        if let Some(plane) = shm.as_deref_mut() {
+            plane.poll_telemetry();
+            if plane.cached_imu.received_at.is_some()
+                && plane.cached_joints.received_at.is_some()
+                && plane.cached_joints.seen_mask == u16::MAX
+            {
+                return Ok(plane.cached_joints.q);
+            }
+        } else if let Some((imu_rx, joints_rx)) = grpc {
             let imu = imu_rx.borrow();
             let joints = joints_rx.borrow();
             if imu.received_at.is_some()
@@ -424,6 +661,7 @@ async fn wait_for_initial_telemetry(
 
 async fn safe_damp_and_close(
     mut ext_opt: Option<ExternalControl<'_>>,
+    shm: Option<&mut ShmDataPlane>,
     robot: &RobotClient,
     cfg: &DeployConfig,
 ) {
@@ -431,7 +669,7 @@ async fn safe_damp_and_close(
         let damp_frame: Vec<JointCommand> = (0..NUM_JOINTS)
             .map(|i| JointCommand::damping(cfg.damping[i]))
             .collect();
-        let _ = ext.publish_joints(damp_frame, None);
+        let _ = submit_commands(ext, shm, damp_frame);
         let _ = ext.disable(None).await;
     }
     if let Some(ext) = ext_opt.take() {
@@ -1092,6 +1330,7 @@ mod tests {
             max_steps: None,
             skip_fix_stand: false,
             telemetry_wait_timeout: Duration::from_secs(2),
+            ..RunnerConfig::default()
         };
         let mut runner = RlRunner::new(cfg, backend).unwrap();
         let (_stop_tx, stop_rx) = oneshot::channel();
@@ -1130,6 +1369,205 @@ mod tests {
             let last = frames.last().unwrap();
             assert!(last.iter().all(|j| j.kp == 0.0 && j.dq == 0.0));
         }
+
+        let _ = srv_tx.send(());
+        srv_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_shm_closed_loop_runs_without_grpc_data_plane_and_records_latency_percentiles() {
+        let suffix = format!("{}_{}", std::process::id(), doso_shm_ipc::monotonic_us());
+        let proprio_name = format!("/doso_rl_proprio_{suffix}");
+        let cmd_name = format!("/doso_rl_cmd_{suffix}");
+        let mut proprio_writer = doso_shm_ipc::ProprioRingWriter::open(&proprio_name).unwrap();
+        let default_pos = DeployConfig::default().default_joint_pos;
+
+        // Publish continuous upright proprioception into /dev/shm (simulating Brainstem 200Hz writer).
+        let stop_feed = Arc::new(AtomicBool::new(false));
+        let stop_feed_bg = stop_feed.clone();
+        let feeder = tokio::spawn(async move {
+            let mut seq = 0_u64;
+            while !stop_feed_bg.load(Ordering::Relaxed) {
+                seq += 1;
+                let payload = doso_shm_ipc::DosoProprioPayload {
+                    sequence: seq,
+                    monotonic_us: doso_shm_ipc::monotonic_us(),
+                    imu_quat_wxyz: [1.0, 0.0, 0.0, 0.0],
+                    imu_gyro_rad_s: [0.0, 0.0, 0.0],
+                    imu_accel_m_s2: [0.0, 0.0, 9.81],
+                    joint_q: default_pos,
+                    imu_fresh: 1,
+                    ..Default::default()
+                };
+                let _ = proprio_writer.publish(&payload);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let gw = MockDosoGateway::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (srv_tx, srv_rx) = oneshot::channel();
+        let server = tonic::transport::Server::builder()
+            .add_service(rpc::system_server::SystemServer::new(gw.clone()))
+            .add_service(rpc::observations_server::ObservationsServer::new(
+                gw.clone(),
+            ))
+            .add_service(rpc::motion_server::MotionServer::new(gw.clone()))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = srv_rx.await;
+                },
+            );
+        let srv_handle = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        let robot = RobotClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let deploy = DeployConfig {
+            step_dt: 0.005, // 200Hz
+            fix_stand_duration_s: 0.1,
+            ..DeployConfig::default()
+        };
+        let backend = Box::new(GainScheduleTestBackend::new(&deploy));
+        let cfg = RunnerConfig {
+            deploy,
+            target_cmd: [0.0, 0.0, 0.0],
+            max_steps: Some(30),
+            skip_fix_stand: false,
+            telemetry_wait_timeout: Duration::from_secs(2),
+            shm_enabled: true,
+            shm_proprio_name: proprio_name,
+            shm_cmd_name: cmd_name.clone(),
+        };
+        let mut runner = RlRunner::new(cfg, backend).unwrap();
+        let (_stop_tx, stop_rx) = oneshot::channel();
+
+        // Simulate Board-A HardwareExternal concurrently polling /dev/shm/doso_ext_cmd_v1
+        // while RlRunner is active (keeps the shared memory mapping alive on Windows too).
+        let stop_reader = Arc::new(AtomicBool::new(false));
+        let stop_reader_bg = stop_reader.clone();
+        let cmd_name_reader = cmd_name.clone();
+        let captured_cmds = Arc::new(Mutex::new(
+            Vec::<doso_shm_ipc::DosoExternalCmdPayload>::new(),
+        ));
+        let captured_bg = captured_cmds.clone();
+        let reader_task = tokio::spawn(async move {
+            let mut reader: Option<doso_shm_ipc::ExternalCmdReader> = None;
+            let mut last_seq = 0_u64;
+            while !stop_reader_bg.load(Ordering::Relaxed) {
+                if reader.is_none() {
+                    if let Ok(r) = doso_shm_ipc::ExternalCmdReader::open(&cmd_name_reader) {
+                        reader = Some(r);
+                    }
+                }
+                if let Some(r) = &reader {
+                    if let Some((seq, cmd)) = r.read_latest(last_seq) {
+                        last_seq = seq;
+                        captured_bg.lock().unwrap().push(cmd);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            if let Some(r) = &reader {
+                if let Some((_, cmd)) = r.read_latest(last_seq) {
+                    captured_bg.lock().unwrap().push(cmd);
+                }
+            }
+        });
+
+        let report = runner.run(&robot, stop_rx).await.unwrap();
+        stop_feed.store(true, Ordering::Relaxed);
+        let _ = feeder.await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stop_reader.store(true, Ordering::Relaxed);
+        let _ = reader_task.await;
+
+        assert!(report.shm_data_plane_active);
+        assert!(!report.damp_triggered);
+        assert_eq!(report.fix_stand_steps + report.policy_steps, 30);
+        assert!(report.policy_steps >= 1);
+        assert_eq!(report.step_latency_us.samples, 30);
+        assert_eq!(report.infer_latency_us.samples as u64, report.policy_steps);
+        assert!(report.tick_jitter_us.samples >= 29);
+
+        // Zero gRPC data-plane joint frames were sent!
+        assert!(
+            gw.frames.lock().unwrap().is_empty(),
+            "expected zero gRPC Action::Frame messages in direct SHM mode"
+        );
+        // Verify live SHM MIT frames received by concurrent reader (session binding, active window, wheel velocity, and final damping frame).
+        {
+            let cmds = captured_cmds.lock().unwrap();
+            assert!(!cmds.is_empty(), "expected live SHM MIT frames captured");
+            let expected_hash = doso_shm_ipc::fnv1a_64(b"rl-test-session");
+            assert!(cmds.iter().all(|c| c.session_id_hash == expected_hash));
+            assert!(cmds.iter().all(|c| c.input_window == 42));
+            assert!(
+                cmds.iter().any(|c| c.kp[12] == 0.0 && c.dq[12] > 0.5),
+                "expected VelocityPolicy wheel command delivered over SHM"
+            );
+            let last_cmd = cmds.last().unwrap();
+            assert!(last_cmd.sequence >= 30);
+            assert!(last_cmd.kp.iter().all(|&v| v == 0.0));
+            assert!(last_cmd.dq.iter().all(|&v| v == 0.0));
+        }
+
+        let _ = srv_tx.send(());
+        srv_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shm_enabled_falls_back_cleanly_to_grpc_when_ring_absent() {
+        let gw = MockDosoGateway::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (srv_tx, srv_rx) = oneshot::channel();
+        let server = tonic::transport::Server::builder()
+            .add_service(rpc::system_server::SystemServer::new(gw.clone()))
+            .add_service(rpc::observations_server::ObservationsServer::new(
+                gw.clone(),
+            ))
+            .add_service(rpc::motion_server::MotionServer::new(gw.clone()))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    let _ = srv_rx.await;
+                },
+            );
+        let srv_handle = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        let robot = RobotClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let deploy = DeployConfig {
+            step_dt: 0.01,
+            fix_stand_duration_s: 0.1,
+            ..DeployConfig::default()
+        };
+        let backend = Box::new(GainScheduleTestBackend::new(&deploy));
+        let cfg = RunnerConfig {
+            deploy,
+            target_cmd: [0.0, 0.0, 0.0],
+            max_steps: Some(6),
+            skip_fix_stand: true,
+            telemetry_wait_timeout: Duration::from_secs(2),
+            shm_enabled: true,
+            shm_proprio_name: format!("/doso_nonexistent_proprio_{}", std::process::id()),
+            shm_cmd_name: format!("/doso_nonexistent_cmd_{}", std::process::id()),
+        };
+        let mut runner = RlRunner::new(cfg, backend).unwrap();
+        let (_stop_tx, stop_rx) = oneshot::channel();
+
+        let report = runner.run(&robot, stop_rx).await.unwrap();
+        assert!(!report.shm_data_plane_active);
+        assert_eq!(report.fix_stand_steps + report.policy_steps, 6);
+        assert!(!gw.frames.lock().unwrap().is_empty());
 
         let _ = srv_tx.send(());
         srv_handle.await.unwrap();

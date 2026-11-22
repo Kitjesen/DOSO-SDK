@@ -192,6 +192,54 @@ impl ExternalControl<'_> {
         Ok(state.reply.clone())
     }
 
+    /// Validates joint targets for finite values, nonnegative gains, and joint count.
+    pub fn validate_joint_commands(
+        joints: &[rpc::JointCommand],
+        expected_count: usize,
+    ) -> Result<()> {
+        if joints.len() != expected_count
+            || joints.iter().any(|joint| {
+                ![joint.q, joint.dq, joint.kp, joint.kd, joint.tau]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    || joint.kp < 0.0
+                    || joint.kd < 0.0
+            })
+        {
+            return Err(Error::invalid(
+                "external targets must match the robot joint count with finite values and nonnegative gains",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reserves the next monotonic sequence number together with the currently
+    /// authorized `(session_id, input_window)` for zero-copy on-board SHM data-plane
+    /// publishers while keeping `Enter`/`Enable`/`Disable`/`Exit` on gRPC.
+    pub fn shm_frame_token(&mut self) -> Result<(String, u64, u64)> {
+        let controller = self
+            .state()?
+            .ok_or_else(|| Error::protocol("external controller state missing"))?;
+        if !controller.fresh || !controller.active || controller.joint_count == 0 {
+            return Err(Error::new(
+                ErrorKind::Rpc(tonic::Code::Unavailable),
+                "external controller is not ready",
+            ));
+        }
+        if self.connection.is_none() {
+            return Err(Error::invalid("external session is closed"));
+        }
+        let window = self.state.borrow().window;
+        if window == 0 {
+            return Err(Error::new(
+                ErrorKind::Rpc(tonic::Code::Unavailable),
+                "external input window is not ready",
+            ));
+        }
+        self.sequence += 1;
+        Ok((controller.session_id, window, self.sequence))
+    }
+
     /// Queue fresh joint targets without waiting for per-frame acknowledgement.
     pub fn publish_joints(
         &mut self,
@@ -207,17 +255,7 @@ impl ExternalControl<'_> {
                 "external controller is not ready",
             ));
         }
-        if joints.len() != controller.joint_count as usize
-            || joints.iter().any(|joint| {
-                ![joint.q, joint.dq, joint.kp, joint.kd, joint.tau]
-                    .iter()
-                    .all(|value| value.is_finite())
-                    || joint.kp < 0.0
-                    || joint.kd < 0.0
-            })
-        {
-            return Err(Error::invalid("external targets must match the robot joint count with finite values and nonnegative gains"));
-        }
+        Self::validate_joint_commands(&joints, controller.joint_count as usize)?;
         let command = self.client.command(request_id)?;
         let id = command.request_id.clone();
         let window = self.state.borrow().window;

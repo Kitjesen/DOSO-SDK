@@ -9,4 +9,4 @@ pub use obs::{
     SINGLE_OBS_DIM,
 };
 pub use ort_backend::{GainScheduleTestBackend, OrtDynamicBackend, PolicyBackend};
-pub use runner::{RlRunner, RunnerConfig, RunnerMode, RunnerReport};
+pub use runner::{LatencyStats, RlRunner, RunnerConfig, RunnerMode, RunnerReport};
