@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
     if args.enable_dds {
         #[cfg(not(has_cyclonedds))]
         {
-            let _ = dds_stop_rx;
+            drop(dds_stop_rx);
             anyhow::bail!(
                 "CycloneDDS support was not compiled in; pass --enable-dds false (or BRAINSTEM_DDS_ENABLED=false) to run standalone Board-A mode without Board B"
             );
