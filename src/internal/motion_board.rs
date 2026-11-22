@@ -78,7 +78,8 @@ impl MotionBoardClient {
         }
         let mut endpoint = Endpoint::from_shared(config.endpoint)
             .map_err(|error| Error::invalid(error.to_string()))?
-            .connect_timeout(config.timeout);
+            .connect_timeout(config.timeout)
+            .tcp_nodelay(true);
         let uri = endpoint.uri();
         if uri.host().is_none()
             || uri

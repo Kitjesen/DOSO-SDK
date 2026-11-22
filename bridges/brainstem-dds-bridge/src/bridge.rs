@@ -4,6 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use doso_sdk::internal::motion_board::{rpc, MotionBoardClient, MotionBoardConfig};
+use doso_shm_ipc::{DosoProprioPayload, ProprioRingReader};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -41,6 +42,9 @@ pub struct BridgeConfig {
     pub max_angular_rps: f64,
     pub producer_boot_id: String,
     pub robot_model: String,
+    pub shm_enabled: bool,
+    pub shm_proprio_name: String,
+    pub shm_poll_period: Duration,
 }
 
 impl Default for BridgeConfig {
@@ -58,6 +62,9 @@ impl Default for BridgeConfig {
             max_angular_rps: 2.5,
             producer_boot_id: default_producer_boot_id(),
             robot_model: "thunder".to_string(),
+            shm_enabled: false,
+            shm_proprio_name: "/doso_proprio_v1".to_string(),
+            shm_poll_period: Duration::from_millis(5),
         }
     }
 }
@@ -349,20 +356,57 @@ impl BridgeRuntime {
         let imu_ok = Arc::new(AtomicBool::new(true));
         let joint_ok = Arc::new(AtomicBool::new(true));
 
-        let imu_task = spawn_imu_forwarder(client.clone(), self.bus.clone(), imu_ok.clone());
-        let joint_task = spawn_joint_forwarder(
-            client.clone(),
-            self.bus.clone(),
-            self.config.robot_model.clone(),
-            joint_ok.clone(),
-        );
+        let telemetry_tasks: Vec<JoinHandle<()>> = if self.config.shm_enabled {
+            match ProprioRingReader::open(&self.config.shm_proprio_name) {
+                Ok(reader) => {
+                    tracing::info!(
+                        shm = %self.config.shm_proprio_name,
+                        poll_ms = self.config.shm_poll_period.as_millis(),
+                        "using POSIX SHM zero-copy proprioception reader for DDS telemetry"
+                    );
+                    vec![spawn_shm_telemetry_forwarder(
+                        reader,
+                        self.config.shm_poll_period,
+                        self.bus.clone(),
+                        self.config.robot_model.clone(),
+                    )]
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        shm = %self.config.shm_proprio_name,
+                        error = %err,
+                        "SHM proprioception unavailable; falling back to gRPC listen_imu/listen_joint"
+                    );
+                    vec![
+                        spawn_imu_forwarder(client.clone(), self.bus.clone(), imu_ok.clone()),
+                        spawn_joint_forwarder(
+                            client.clone(),
+                            self.bus.clone(),
+                            self.config.robot_model.clone(),
+                            joint_ok.clone(),
+                        ),
+                    ]
+                }
+            }
+        } else {
+            vec![
+                spawn_imu_forwarder(client.clone(), self.bus.clone(), imu_ok.clone()),
+                spawn_joint_forwarder(
+                    client.clone(),
+                    self.bus.clone(),
+                    self.config.robot_model.clone(),
+                    joint_ok.clone(),
+                ),
+            ]
+        };
 
         let result = self
             .control_and_state_loop(client.clone(), stop_rx, &imu_ok, &joint_ok)
             .await;
 
-        imu_task.abort();
-        joint_task.abort();
+        for task in telemetry_tasks {
+            task.abort();
+        }
         result
     }
 
@@ -849,6 +893,58 @@ fn spawn_joint_forwarder(
             }
         }
         healthy.store(false, Ordering::Relaxed);
+    })
+}
+
+fn map_shm_proprio_to_dds(
+    p: &DosoProprioPayload,
+    robot_model: &str,
+) -> (ImuBodySample, JointStateSample) {
+    let stamp = now_wall_stamp();
+    let imu = ImuBodySample {
+        stamp: stamp.clone(),
+        orientation_xyzw: [
+            p.imu_quat_wxyz[1],
+            p.imu_quat_wxyz[2],
+            p.imu_quat_wxyz[3],
+            p.imu_quat_wxyz[0],
+        ],
+        angular_velocity_xyz: p.imu_gyro_rad_s,
+        linear_acceleration_xyz: p.imu_accel_m_s2,
+    };
+    let joints = JointStateSample {
+        stamp,
+        robot_model: robot_model.to_string(),
+        position: p.joint_q,
+        velocity: p.joint_dq,
+        effort: p.joint_tau,
+    };
+    (imu, joints)
+}
+
+fn spawn_shm_telemetry_forwarder(
+    reader: ProprioRingReader,
+    poll_period: Duration,
+    bus: Arc<dyn DdsBus>,
+    robot_model: String,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_seq = 0_u64;
+        let mut tick = tokio::time::interval(poll_period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if let Some((seq, payload)) = reader.read_latest(last_seq) {
+                last_seq = seq;
+                let (imu, joints) = map_shm_proprio_to_dds(&payload, &robot_model);
+                if let Err(err) = bus.write_imu_body(&imu) {
+                    tracing::warn!(error = %err, "failed writing rt/imu/body from SHM");
+                }
+                if let Err(err) = bus.write_joint_states(&joints) {
+                    tracing::warn!(error = %err, "failed writing rt/robot/joint_states from SHM");
+                }
+            }
+        }
     })
 }
 
@@ -1505,5 +1601,55 @@ mod tests {
         bridge_task.await.unwrap();
         let _ = srv_stop.send(());
         srv_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shm_proprio_forwarder_publishes_imu_and_joints_to_dds_bus() {
+        let shm_name = format!(
+            "/doso_bridge_shm_test_{}_{}",
+            std::process::id(),
+            doso_shm_ipc::monotonic_us()
+        );
+        let mut writer = doso_shm_ipc::ProprioRingWriter::open(&shm_name).unwrap();
+        let reader = ProprioRingReader::open(&shm_name).unwrap();
+        let bus = Arc::new(InMemoryDdsBus::default());
+
+        let task = spawn_shm_telemetry_forwarder(
+            reader,
+            Duration::from_millis(2),
+            bus.clone(),
+            "thunder".to_string(),
+        );
+
+        let mut payload = DosoProprioPayload {
+            sequence: 9,
+            monotonic_us: 123_456,
+            imu_quat_wxyz: [0.98, 0.01, -0.02, 0.03],
+            imu_gyro_rad_s: [0.1, 0.2, 0.3],
+            imu_accel_m_s2: [0.0, 0.0, 9.81],
+            imu_fresh: 1,
+            ..Default::default()
+        };
+        for i in 0..16 {
+            payload.joint_q[i] = i as f64 * 0.05;
+            payload.joint_dq[i] = -(i as f64) * 0.1;
+            payload.joint_tau[i] = i as f64 * 0.2;
+        }
+        writer.publish(&payload).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        task.abort();
+
+        let imus = bus.imu_tx.lock().unwrap();
+        let joints = bus.joints_tx.lock().unwrap();
+        assert!(!imus.is_empty(), "expected IMU sample forwarded from SHM");
+        assert!(
+            !joints.is_empty(),
+            "expected joint sample forwarded from SHM"
+        );
+        assert!((imus[0].orientation_xyzw[3] - 0.98).abs() < 1e-9);
+        assert!((imus[0].orientation_xyzw[0] - 0.01).abs() < 1e-9);
+        assert!((joints[0].position[15] - 0.75).abs() < 1e-9);
+        assert!((joints[0].effort[15] - 3.0).abs() < 1e-9);
     }
 }

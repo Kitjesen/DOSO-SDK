@@ -8,6 +8,9 @@ use anyhow::Result;
 use doso_sdk::internal::motion_board::rpc as mb;
 use doso_sdk::internal::motion_board::{MotionBoardClient, MotionBoardConfig};
 use doso_sdk::rpc as doso;
+use doso_shm_ipc::{
+    DosoExternalCmdPayload, DosoProprioPayload, ExternalCmdWriter, ProprioRingReader,
+};
 use prost_types::{value::Kind, ListValue, Struct, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -30,6 +33,10 @@ pub struct BaseGatewayConfig {
     pub api_key: Option<String>,
     pub low_level_endpoint_override: Option<String>,
     pub teleop_watchdog: Duration,
+    pub shm_enabled: bool,
+    pub shm_proprio_name: String,
+    pub shm_cmd_name: String,
+    pub shm_poll_period: Duration,
 }
 
 impl Default for BaseGatewayConfig {
@@ -44,6 +51,10 @@ impl Default for BaseGatewayConfig {
             api_key: None,
             low_level_endpoint_override: None,
             teleop_watchdog: Duration::from_millis(250),
+            shm_enabled: false,
+            shm_proprio_name: "/doso_proprio_v1".to_string(),
+            shm_cmd_name: "/doso_ext_cmd_v1".to_string(),
+            shm_poll_period: Duration::from_millis(5),
         }
     }
 }
@@ -124,6 +135,7 @@ pub async fn spawn_base_gateway_on_listener(
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<Result<()>>)> {
     let local_addr = listener.local_addr()?;
     let router = tonic::transport::Server::builder()
+        .tcp_nodelay(true)
         .add_service(doso::system_server::SystemServer::new(service.clone()))
         .add_service(doso::motion_server::MotionServer::new(service.clone()))
         .add_service(doso::observations_server::ObservationsServer::new(
@@ -306,6 +318,52 @@ fn map_imu(imu: mb::Imu) -> doso::ImuSample {
         }),
         linear_acceleration_m_s2: imu.linear_acceleration.map(map_vec3),
         source_elapsed: imu.timestamp,
+    }
+}
+
+fn shm_elapsed_duration(monotonic_us: u64) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: (monotonic_us / 1_000_000) as i64,
+        nanos: ((monotonic_us % 1_000_000) * 1_000) as i32,
+    }
+}
+
+fn map_shm_imu(p: &DosoProprioPayload) -> doso::ImuSample {
+    doso::ImuSample {
+        angular_velocity_rad_s: Some(doso::Vector3 {
+            x: p.imu_gyro_rad_s[0],
+            y: p.imu_gyro_rad_s[1],
+            z: p.imu_gyro_rad_s[2],
+        }),
+        orientation_world_to_body: Some(doso::Quaternion {
+            w: p.imu_quat_wxyz[0],
+            x: p.imu_quat_wxyz[1],
+            y: p.imu_quat_wxyz[2],
+            z: p.imu_quat_wxyz[3],
+        }),
+        linear_acceleration_m_s2: Some(doso::Vector3 {
+            x: p.imu_accel_m_s2[0],
+            y: p.imu_accel_m_s2[1],
+            z: p.imu_accel_m_s2[2],
+        }),
+        source_elapsed: Some(shm_elapsed_duration(p.monotonic_us)),
+    }
+}
+
+fn map_shm_joint(p: &DosoProprioPayload) -> doso::JointSample {
+    let mut joints = Vec::with_capacity(16);
+    for i in 0..16 {
+        joints.push(doso::JointState {
+            id: i as u32,
+            position_rad: p.joint_q[i],
+            velocity_rad_s: p.joint_dq[i],
+            torque_nm: p.joint_tau[i],
+            status_code: u32::from(p.joint_status[i]),
+        });
+    }
+    doso::JointSample {
+        joints,
+        source_elapsed: Some(shm_elapsed_duration(p.monotonic_us)),
     }
 }
 
@@ -584,6 +642,10 @@ impl doso::system_server::System for BaseGatewayService {
             ),
             ("board_a_motion", sval(Kind::BoolValue(true))),
             ("board_b_autonomy", sval(Kind::BoolValue(false))),
+            (
+                "shm_ipc_enabled",
+                sval(Kind::BoolValue(self.config.shm_enabled)),
+            ),
             ("motion", sval(Kind::BoolValue(true))),
             ("sport", sval(Kind::BoolValue(true))),
             ("teleop", sval(Kind::BoolValue(true))),
@@ -661,6 +723,29 @@ impl doso::observations_server::Observations for BaseGatewayService {
         request: Request<doso::Empty>,
     ) -> std::result::Result<Response<Self::WatchImuStream>, Status> {
         self.check_auth(&request)?;
+        if self.config.shm_enabled {
+            if let Ok(reader) = ProprioRingReader::open(&self.config.shm_proprio_name) {
+                let poll = self.config.shm_poll_period;
+                let (tx, rx) = mpsc::channel(64);
+                tokio::spawn(async move {
+                    let mut last_seq = 0_u64;
+                    let mut tick = tokio::time::interval(poll);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        if let Some((seq, payload)) = reader.read_latest(last_seq) {
+                            last_seq = seq;
+                            if tx.send(Ok(map_shm_imu(&payload))).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+                return Ok(Response::new(Box::pin(
+                    tokio_stream::wrappers::ReceiverStream::new(rx),
+                )));
+            }
+        }
         let mb = self.client().await?;
         let mut upstream = mb.listen_imu().await.map_err(map_sdk_err)?;
         let (tx, rx) = mpsc::channel(64);
@@ -682,6 +767,29 @@ impl doso::observations_server::Observations for BaseGatewayService {
         request: Request<doso::Empty>,
     ) -> std::result::Result<Response<Self::WatchJointsStream>, Status> {
         self.check_auth(&request)?;
+        if self.config.shm_enabled {
+            if let Ok(reader) = ProprioRingReader::open(&self.config.shm_proprio_name) {
+                let poll = self.config.shm_poll_period;
+                let (tx, rx) = mpsc::channel(64);
+                tokio::spawn(async move {
+                    let mut last_seq = 0_u64;
+                    let mut tick = tokio::time::interval(poll);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        if let Some((seq, payload)) = reader.read_latest(last_seq) {
+                            last_seq = seq;
+                            if tx.send(Ok(map_shm_joint(&payload))).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+                return Ok(Response::new(Box::pin(
+                    tokio_stream::wrappers::ReceiverStream::new(rx),
+                )));
+            }
+        }
         let mb = self.client().await?;
         let mut upstream = mb.listen_joint().await.map_err(map_sdk_err)?;
         let (tx, rx) = mpsc::channel(64);
@@ -833,7 +941,11 @@ impl doso::motion_server::Motion for BaseGatewayService {
         }
 
         let session_token = enter_status.session_token.clone();
-        let (frame_tx, frame_rx) = mpsc::channel::<mb::ExternalFrame>(8);
+        // Latest-wins relay: send the empty session handshake frame first, then coalesce any
+        // bursts via a watch slot so Brainstem never executes stale queued joint targets.
+        let (latest_tx, mut latest_rx) =
+            tokio::sync::watch::channel::<Option<mb::ExternalFrame>>(None);
+        let (frame_tx, frame_rx) = mpsc::channel::<mb::ExternalFrame>(2);
         // Real Brainstem ExternalService.control() requires an initial empty handshake frame
         // (sequence == 0, input_window == 0, targets.is_empty()) within 300ms before granting
         // the active input_window.
@@ -845,6 +957,16 @@ impl doso::motion_server::Motion for BaseGatewayService {
                 input_window: 0,
             })
             .await;
+        tokio::spawn(async move {
+            while latest_rx.changed().await.is_ok() {
+                let maybe_frame = latest_rx.borrow_and_update().clone();
+                if let Some(frame) = maybe_frame {
+                    if frame_tx.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
         let mut status_stream = match ext_client
             .control(tokio_stream::wrappers::ReceiverStream::new(frame_rx))
             .await
@@ -878,6 +1000,35 @@ impl doso::motion_server::Motion for BaseGatewayService {
                     ));
                 }
             }
+        };
+
+        let session_id_for_hash = if !initial_status.session_id.is_empty() {
+            initial_status.session_id.clone()
+        } else {
+            req_id.clone()
+        };
+        let session_id_hash = doso_shm_ipc::fnv1a_64(session_id_for_hash.as_bytes());
+        let mut shm_cmd_writer = if self.config.shm_enabled {
+            match ExternalCmdWriter::open(&self.config.shm_cmd_name) {
+                Ok(writer) => {
+                    tracing::info!(
+                        shm = %self.config.shm_cmd_name,
+                        session_id = %session_id_for_hash,
+                        "opened POSIX SHM external MIT command writer (control plane stays on gRPC)"
+                    );
+                    Some(writer)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        shm = %self.config.shm_cmd_name,
+                        error = %err,
+                        "failed to open SHM external command writer; falling back to gRPC frame relay"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         let init_reply = doso::ExternalControlReply {
@@ -973,25 +1124,49 @@ impl doso::motion_server::Motion for BaseGatewayService {
                                 }
                             }
                             Some(doso::external_control_request::Action::Frame(targets)) => {
-                                let mapped: Vec<mb::ExternalJointCommand> = targets
-                                    .joints
-                                    .into_iter()
-                                    .map(|j| mb::ExternalJointCommand {
-                                        q: j.q,
-                                        dq: j.dq,
-                                        kp: j.kp,
-                                        kd: j.kd,
-                                        tau: j.tau,
-                                    })
-                                    .collect();
-                                let frame = mb::ExternalFrame {
-                                    session_token: session_token.clone(),
-                                    sequence: req.sequence,
-                                    targets: mapped,
-                                    input_window: req.input_window,
-                                };
-                                if frame_tx.try_send(frame).is_err() {
-                                    tracing::debug!("dropped/saturated external frame relay");
+                                if let (Some(shm_writer), true) =
+                                    (&mut shm_cmd_writer, targets.joints.len() == 16)
+                                {
+                                    let mut payload = DosoExternalCmdPayload {
+                                        session_id_hash,
+                                        input_window: req.input_window,
+                                        sequence: req.sequence,
+                                        monotonic_us: doso_shm_ipc::monotonic_us(),
+                                        ..Default::default()
+                                    };
+                                    for (i, j) in targets.joints.iter().enumerate() {
+                                        payload.q[i] = j.q;
+                                        payload.dq[i] = j.dq;
+                                        payload.kp[i] = j.kp;
+                                        payload.kd[i] = j.kd;
+                                        payload.tau[i] = j.tau;
+                                    }
+                                    if let Err(err) = shm_writer.publish(&payload) {
+                                        tracing::warn!(
+                                            error = %err,
+                                            "SHM external command publish failed"
+                                        );
+                                    }
+                                } else {
+                                    let mapped: Vec<mb::ExternalJointCommand> = targets
+                                        .joints
+                                        .into_iter()
+                                        .map(|j| mb::ExternalJointCommand {
+                                            q: j.q,
+                                            dq: j.dq,
+                                            kp: j.kp,
+                                            kd: j.kd,
+                                            tau: j.tau,
+                                        })
+                                        .collect();
+                                    let frame = mb::ExternalFrame {
+                                        session_token: session_token.clone(),
+                                        sequence: req.sequence,
+                                        targets: mapped,
+                                        input_window: req.input_window,
+                                    };
+                                    // Latest-wins overwrite: never queue stale 200Hz joint targets.
+                                    let _ = latest_tx.send_replace(Some(frame));
                                 }
                             }
                             Some(doso::external_control_request::Action::Close(_)) => {
@@ -2791,6 +2966,102 @@ mod tests {
 
         let _ = b_stop.send(());
         b_task.await.unwrap();
+        let _ = gw_stop.send(());
+        gw_task.await.unwrap().unwrap();
+        let _ = mb_stop.send(());
+        mb_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shm_data_plane_serves_proprio_and_writes_external_mit_frames() {
+        let suffix = format!("{}_{}", std::process::id(), doso_shm_ipc::monotonic_us());
+        let proprio_name = format!("/doso_gw_proprio_{suffix}");
+        let cmd_name = format!("/doso_gw_cmd_{suffix}");
+        let mut proprio_writer = doso_shm_ipc::ProprioRingWriter::open(&proprio_name).unwrap();
+        let mut proprio = DosoProprioPayload {
+            sequence: 11,
+            monotonic_us: 2_500_000,
+            imu_quat_wxyz: [0.97, 0.02, -0.01, 0.04],
+            imu_gyro_rad_s: [0.11, -0.22, 0.33],
+            imu_accel_m_s2: [0.0, 0.0, 9.81],
+            imu_fresh: 1,
+            ..Default::default()
+        };
+        for i in 0..16 {
+            proprio.joint_q[i] = 0.04 * (i as f64);
+            proprio.joint_dq[i] = -0.02 * (i as f64);
+            proprio.joint_tau[i] = 0.1 * (i as f64);
+            proprio.joint_status[i] = 2;
+        }
+        proprio_writer.publish(&proprio).unwrap();
+
+        let (mb_url, mb_svc, mb_stop, mb_task) = spawn_mock_brainstem().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (gw_stop, gw_rx) = oneshot::channel();
+        let gw_cfg = BaseGatewayConfig {
+            brainstem_endpoint: mb_url,
+            shm_enabled: true,
+            shm_proprio_name: proprio_name,
+            shm_cmd_name: cmd_name.clone(),
+            shm_poll_period: Duration::from_millis(2),
+            ..BaseGatewayConfig::default()
+        };
+        let (addr, gw_task) =
+            spawn_base_gateway_on_listener(BaseGatewayService::new(gw_cfg), listener, gw_rx)
+                .await
+                .unwrap();
+
+        let robot = RobotClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+
+        // 1. Verify IMU and Joints streams are served directly from SHM (not gRPC).
+        let imu_sample = {
+            let mut imu_stream = robot.observations().watch_imu().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), imu_stream.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        assert!(
+            (imu_sample.orientation_world_to_body.unwrap().w - 0.97).abs() < 1e-6,
+            "expected IMU quaternion from SHM ring"
+        );
+        let joint_sample = {
+            let mut joint_stream = robot.observations().watch_joints().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), joint_stream.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(joint_sample.joints.len(), 16);
+        assert!(
+            (joint_sample.joints[15].position_rad - 0.60).abs() < 1e-6,
+            "expected joint positions from SHM ring"
+        );
+
+        // 2. Verify ExternalControl uses gRPC for Enter/Enable/Close while writing 200Hz MIT frames to SHM.
+        let mut ext = robot.low_level(None).await.unwrap();
+        assert!(ext.enable(None).await.unwrap().accepted);
+        let cmds = vec![JointCommand::leg_pd(0.35, 50.0, 2.0); 16];
+        ext.publish_joints(cmds, None).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let cmd_reader = doso_shm_ipc::ExternalCmdReader::open(&cmd_name).unwrap();
+        let (_, written) = cmd_reader
+            .read_latest(0)
+            .expect("expected MIT command written into SHM ring");
+        assert!(written.session_id_hash != 0);
+        assert!(written.input_window > 0);
+        assert!((written.q[0] - 0.35).abs() < 1e-6);
+        assert!((written.kp[0] - 50.0).abs() < 1e-6);
+        assert!((written.kd[0] - 2.0).abs() < 1e-6);
+        // Zero gRPC ExternalFrame payloads sent on data plane!
+        assert_eq!(mb_svc.ext_frames.lock().unwrap().len(), 0);
+
+        assert!(ext.close(None).await.unwrap().accepted);
         let _ = gw_stop.send(());
         gw_task.await.unwrap().unwrap();
         let _ = mb_stop.send(());

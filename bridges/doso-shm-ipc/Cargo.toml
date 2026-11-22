@@ -1,0 +1,15 @@
+[package]
+name = "doso-shm-ipc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "POSIX /dev/shm and cross-platform lock-free seqlock ring buffers for Board-A sub-50us IPC"
+
+[workspace]
+
+[lib]
+name = "doso_shm_ipc"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow = "1"

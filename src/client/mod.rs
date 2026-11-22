@@ -65,7 +65,8 @@ fn build_endpoint(
     }
     let mut endpoint = Endpoint::from_shared(raw.to_owned())
         .map_err(|e| Error::invalid(e.to_string()))?
-        .connect_timeout(timeout);
+        .connect_timeout(timeout)
+        .tcp_nodelay(true);
     if raw.starts_with("https://") {
         let mut tls = ClientTlsConfig::new().with_native_roots();
         if let Some(certificate) = tls_ca_certificate {
