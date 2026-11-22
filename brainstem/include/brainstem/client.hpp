@@ -44,6 +44,7 @@ class Client final {
   Result stop() noexcept;
   Result standUp();
   Result sitDown();
+  Result damp();
   Result enableMotors();
   Result disableMotors();
   Result setJointZero();

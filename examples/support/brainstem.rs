@@ -1,11 +1,10 @@
-use doso_sdk::{
-    brainstem::{Certificate, ClientTlsConfig, Identity},
-    BrainstemClient, BrainstemConfig,
+use doso_sdk::internal::motion_board::{
+    Certificate, ClientTlsConfig, Identity, MotionBoardClient, MotionBoardConfig,
 };
 use std::{env, fs, path::PathBuf};
 
-pub async fn connect(endpoint: &str) -> Result<BrainstemClient, Box<dyn std::error::Error>> {
-    let mut config = BrainstemConfig::new(endpoint);
+pub async fn connect(endpoint: &str) -> Result<MotionBoardClient, Box<dyn std::error::Error>> {
+    let mut config = MotionBoardConfig::new(endpoint);
     if endpoint.starts_with("https://") {
         if let Some(directory) = env::var_os("DOSO_BRAINSTEM_CERT_DIR") {
             let directory = PathBuf::from(directory);
@@ -19,5 +18,5 @@ pub async fn connect(endpoint: &str) -> Result<BrainstemClient, Box<dyn std::err
             );
         }
     }
-    Ok(BrainstemClient::with_config(config).await?)
+    Ok(MotionBoardClient::with_config(config).await?)
 }

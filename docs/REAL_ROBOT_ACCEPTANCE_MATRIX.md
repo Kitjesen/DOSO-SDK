@@ -1,6 +1,6 @@
 # DOSO SDK 七域真机验收矩阵
 
-更新日期：2026-11-19。本文记录 `rust` 分支的真实机器人验收动作、标准和结果。
+更新于 2026-11-20。本文记录 `rust` 分支的真实机器人验收动作、标准和结果。
 
 ## 验收规则
 
@@ -32,7 +32,7 @@
 3. 确认 CAN、IMU、相机、电机反馈和地图服务处于已知状态。
 4. 确认云端运动权限关闭。所有运动动作只从本地 SDK 发起。
 5. 保存 `systemctl`、监听端口、网络地址、配置摘要和 `field-preflight.sh` 原始输出。
-6. 每项动作使用新的 request ID。未知回执保留原 request ID，重新读取状态后再判断结果，不重复发送同一动作。
+6. 支持 request ID 的动作使用新的 ID 并记录。应答未知时保留原调用记录，先读回状态，避免重复发送动作。直连站坐 RPC 返回空应答，须另外确认实际姿态。
 
 ## 1. 连接和 System 信息
 
@@ -56,12 +56,12 @@ cargo run --example read_brainstem -- http://<robot>:13145
 | 项目 | 内容 |
 | --- | --- |
 | 目标 | 证明本地 SDK 命令经过原有仲裁、回执和安全状态链 |
-| SDK 入口 | `motion().stand_up()`、`sit_down()`、`stop()`、`body_state()`、`control_status()`、`observations().motors()` |
+| SDK 入口 | 当前 `13145` 使用 `BrainstemClient::stand_up()`、`sit_down()`、`damp()`（`v0.0.1` 解析式阻尼软急停）、`control_status()` 和 `motor_status()`。[直连协议](../brainstem/protocol/brainstem_api/cms.proto) |
 | 前置 | System 门通过，身体处于可控的落地状态，电机输出和控制 owner 已记录，现场急停可用。 |
-| 执行 | 发送站起，观察身体状态到 Standing。发送坐下，观察回到 Grounded。每个过渡中单独发送停止，记录停止回执、最终身体状态、控制 owner、电机输出和故障。 |
-| 通过标准 | 每个动作只有一个 request ID，回执和状态身份一致。站坐状态按真实源变化结束。停止后最终输出关闭或进入合同定义的安全状态，控制 owner 和关键故障字段没有被 SDK 伪造。 |
+| 执行 | 分别发送站起和坐下，通过 `control_status()` 和现场观察确认到达 Standing、Grounded，记录控制方、输出门和故障。姿态过渡中止保留为单独验收项，等待对应执行接口。 |
+| 通过标准 | 站坐 RPC 成功后，身体状态读回与实际姿态一致。完整通过还要求过渡中止后确认实际停稳并读回约定的安全状态。遥操作的零速度回执、释放租约均不能计为姿态中止通过。 |
 | 失败处理 | 回执未知、状态不变化、停止未确认、控制 owner 异常或电机故障时立即停止后续运动门，保留现场状态。 |
-| 证据 | `02-motion-posture-stop.json`、`02-motion-posture-stop.log`、身体状态流和电机状态快照。 |
+| 证据 | `02-motion-posture-stop.json`、`02-motion-posture-stop.log`、带时间的状态读回、电机快照及现场动作结果。 |
 
 ## 3. IMU、关节 100Hz、状态查询和电压
 
@@ -111,14 +111,14 @@ cargo run --locked --release --example measure_brainstem -- https://thunder-01.l
 | 项目 | 内容 |
 | --- | --- |
 | 目标 | 证明导航规划、任务身份、路线、执行状态和到点结果来自真实 nav owner |
-| SDK 入口 | `navigation().preview()`、`goal()`、`route()`、`watch_path()`、`watch()`、`wait()`、`pause()`、`resume()`、`cancel()` |
+| SDK 入口 | `navigation().preview_plan()`、`go_to()`、`route()`、`watch_path()`、`watch()`、`wait()`、`pause()`、`resume()`、`cancel()` |
 | 前置 | Localization 和地图门通过。现场选择无障碍短路线，确认速度上限、到达半径、急停和人工接管。 |
 | 规划执行 | 先执行只读规划预览并保存路线。再提交一个短距离目标，记录 request ID、task ID、路线、状态流和最终状态。 |
 | 通过标准 | 预览不创建任务。真实目标只创建一个任务并返回同一 task ID。路线坐标系和点集有效。任务状态按 `accepted → running → succeeded` 或真实失败原因变化。机器人在到达半径内停稳，最终状态和现场位置一致。 |
 | 失败处理 | 规划失败、task ID 不一致、暂停/取消不生效、到点不稳或状态流身份错误时停止导航扩展，不重复发送目标。 |
 | 证据 | `06-navigation-preview-goal.json`、规划路线、任务流、到点位置和现场视频。 |
 
-建议命令：
+完成只读预览并确认现场运行条件后，以下示例会提交真实目标。
 
 ```text
 cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeout_seconds>
@@ -138,13 +138,13 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 | 失败处理 | 任一回执未知、索引不一致、目标被错误重放、输出未确认关闭或断线未回退时立即使用现场急停并标记 External 门失败。 |
 | 证据 | `07-external-handover.json`、控制器状态流、逐关节回执、输出关闭确认、现场视频和急停记录。 |
 
-## 结果汇总模板
+## 现场验收结果
 
 | 门 | 结果 | 开始/结束 | 发布物与版本 | 证据目录 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| 1 System | `NOT RUN` |  |  |  |  |
+| 1 System | `PASS`，局域网直连读回身体状态、控制方、租约、Profile、16 路电压和电机状态 | 2026-11-20 01:17:03–01:17:05 CST | `rust` / `54e9ae5` | [系统快照与判定](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/01-system-connect.json) | 明文 `13145`，mTLS 与正式设备身份另验 |
 | 2 Motion | `NOT RUN` |  |  |  |  |
-| 3 Observations | `FAIL`。并发 900 秒，IMU / 最差关节轴接收空窗 8.747 / 4.696 秒；纯流 900 秒，两者均为 31.456 秒。360 次并发查询成功。 | 2026-11-19 20:34–21:05 CST | `v0.2.0` / `3265d81` | [两轮真机报告](D:/DOSO/artifacts/robot-cloud/sdk-soak-20261119T201433/RESULT.md) | 2 秒连续交付门槛未通过；1 小时验收待执行 |
+| 3 Observations | `PASS`，5 GHz 并发 900 秒，360/360 次查询成功。IMU / 最差关节轴接收空窗为 269.473 / 271.880 ms | 2026-11-20 01:01:57–01:16:57 CST | `rust` / `54e9ae5` | [逐轴及查询记录](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/sdk.log) · [2.4 GHz 历史失败](D:/DOSO/artifacts/robot-cloud/sdk-soak-20261119T201433/RESULT.md) | 5 GHz 纯流对照也已通过。1 小时并发窗口待验 |
 | 4 Localization/Maps | `NOT RUN` |  |  |  |  |
 | 5 Point cloud/Camera/Video | `FAIL`（relay 预热后相机临时桥通过；正式 5052、点云、App、公网未通过，冷启动不稳定） | 2026-11-15 | SDK 2bf587b | `D:\DOSO\artifacts\robot-cloud\real-connect-20261113` | 见相机窗口记录 |
 | 6 Navigation | `NOT RUN` |  |  |  |  |
@@ -152,7 +152,7 @@ cargo run --example navigate -- https://<gateway>:5052 <x> <y> <z> <yaw> <timeou
 
 ## 现阶段状态
 
-SDK 本地合同回归为 124 项通过。当前 Brainstem 直连观测门已经执行并记为 `FAIL`，原因是 900 秒窗口存在超过 2 秒的长时间空窗，平均频率不能替代连续性。正式机器人 5052 服务不属于当前直接路径。动作、导航到点、External 硬件接管和关闭回退仍需按本矩阵现场执行。相机消息合同已通过真实 go2rtc relay 的临时桥隔离验收，但需要预热，Gate 5 仍为 `FAIL`；其他未完成的门保持 `NOT RUN` 或 `BLOCKED`，不使用仿真结果替代真机结果。
+SDK 本地合同回归为 124 项通过。5 GHz 明文局域网下，Brainstem 直连已通过系统状态读取和 15 分钟并发观测验收。下一项稳定性验证是同负载的 1 小时窗口。站坐与停止、导航到点、External 硬件接管与回退仍待现场验收。相机临时桥已读到真实 go2rtc 画面，冷启动需要预热，第 5 门仍为 `FAIL`。
 
 ## 2026-11-14 现场窗口记录
 

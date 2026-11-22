@@ -1,5 +1,5 @@
 use super::{Config, DosoClient, ErrorKind, Service};
-use doso_sdk::{brainstem::rpc::Voltage, BrainstemClient, BrainstemConfig};
+use doso_sdk::internal::motion_board::{rpc::Voltage, MotionBoardClient, MotionBoardConfig};
 use std::{
     convert::Infallible,
     fs,
@@ -288,9 +288,12 @@ async fn brainstem_mtls_requires_client_identity_and_matching_hostname() {
     });
 
     async fn read(endpoint: String, tls: ClientTlsConfig) -> doso_sdk::Result<Voltage> {
-        let mut config = BrainstemConfig::new(endpoint).with_tls(tls);
+        let mut config = MotionBoardConfig::new(endpoint).with_tls(tls);
         config.timeout = Duration::from_secs(3);
-        BrainstemClient::with_config(config).await?.voltage().await
+        MotionBoardClient::with_config(config)
+            .await?
+            .voltage()
+            .await
     }
 
     let local = format!("https://localhost:{port}");

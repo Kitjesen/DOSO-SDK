@@ -329,6 +329,14 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status Damp(grpc::ServerContext *, const google::protobuf::Empty *,
+                    google::protobuf::Empty *) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++damp_calls_;
+    lease_active_ = false;
+    return grpc::Status::OK;
+  }
+
   [[nodiscard]] unsigned statusCalls() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return status_calls_;
@@ -367,6 +375,11 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
   [[nodiscard]] unsigned sitCalls() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return sit_calls_;
+  }
+
+  [[nodiscard]] unsigned dampCalls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return damp_calls_;
   }
 
   [[nodiscard]] unsigned enableCalls() const {
@@ -504,6 +517,7 @@ class ControlService final : public brainstem::api::v1::RobotControl::Service {
   unsigned release_calls_{0};
   unsigned stand_calls_{0};
   unsigned sit_calls_{0};
+  unsigned damp_calls_{0};
   unsigned enable_calls_{0};
   unsigned disable_calls_{0};
   unsigned set_zero_calls_{0};
@@ -1302,6 +1316,32 @@ void testBodyActionDoesNotRunAfterUnconfirmedStop() {
   check(server.service().sitCalls() == 0, "unconfirmed stop must suppress SitDown RPC");
 }
 
+void testDampSoftStopsImmediatelyAndRevokesLocalLease() {
+  TestServer server;
+  brainstem::Client client(server.config());
+  check(client.refresh().ok, "test lease must be ready");
+
+  const unsigned releases_before = server.service().releaseCalls();
+  const brainstem::Result damp = client.damp();
+  check(damp.ok && damp.transport_ok && damp.accepted, "Damp must be accepted");
+  check(damp.confirmsStop(), "Damp must confirm stop and clear local lease");
+  check(server.service().dampCalls() == 1, "Damp must call the Damp RPC once");
+  check(server.service().releaseCalls() == releases_before,
+        "Damp emergency soft-stop must not wait on stop/release beforehand");
+  check(damp.state.body.kind == brainstem::BodyStateKind::Damping,
+        "accepted Damp from Standing must report Damping state");
+  check(damp.state.reason == "body_action_accepted:damp",
+        "Damp acceptance reason must be explicit");
+
+  brainstem::api::v1::ControlStatus snapshot;
+  snapshot.mutable_fsm()->set_kind(brainstem::api::v1::CMS_STATE_KIND_DAMPING);
+  snapshot.set_motor_output_enabled(true);
+  server.service().setStatusSnapshot(snapshot);
+  const auto status = client.getControlStatus();
+  check(status.result.ok && status.value.body.kind == brainstem::BodyStateKind::Damping,
+        "GetControlStatus must decode CMS_STATE_KIND_DAMPING");
+}
+
 void testOldServerFailsClosedWithProtocolReason() {
   LegacyService service;
   grpc::ServerBuilder builder;
@@ -1336,6 +1376,11 @@ void testOldServerFailsClosedWithProtocolReason() {
   const brainstem::Result stream = imu->wait();
   check(!stream.ok && stream.transport_ok && stream.state.reason == "protocol_incompatible",
         "missing stream RPC must preserve protocol incompatibility");
+
+  const brainstem::Result damp = client.damp();
+  check(!damp.ok && damp.transport_ok && !damp.accepted &&
+            damp.state.reason == "protocol_incompatible",
+        "missing Damp RPC must preserve protocol incompatibility");
 
   server->Shutdown();
   server->Wait();
@@ -1435,6 +1480,7 @@ int main() {
     testReleaseTransportFailureIsVisible();
     testStandAndSitStopLocomotionBeforeTheAction();
     testBodyActionDoesNotRunAfterUnconfirmedStop();
+    testDampSoftStopsImmediatelyAndRevokesLocalLease();
     testOldServerFailsClosedWithProtocolReason();
 #ifndef _WIN32
     testMutualTlsControlPath();

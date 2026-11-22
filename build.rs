@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "brainstem/protocol/brainstem_api/cms.proto",
         "brainstem/protocol/brainstem_api/common.proto",
         "brainstem/protocol/brainstem_api/external.proto",
+        "brainstem/protocol/brainstem_api/recovery.proto",
     ];
     tonic_prost_build::configure().compile_protos(&brainstem_protos, &["brainstem/protocol"])?;
     println!("cargo:rerun-if-changed=brainstem/protocol");

@@ -49,6 +49,11 @@ impl<'a> Motion<'a> {
         Ok(session)
     }
 
+    /// Alias of [`Motion::claim_control`] matching Zsibot ownership semantics (`TakeControl`).
+    pub async fn take_control(&self, request_id: Option<&str>) -> Result<Teleop<'a>> {
+        self.claim_control(request_id).await
+    }
+
     /// Open a continuous input stream. Native authority is claimed on the first velocity.
     pub async fn teleop(&self) -> Result<Teleop<'a>> {
         let command = self.0.command(None)?;

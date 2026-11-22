@@ -26,6 +26,8 @@ message SystemInfo {
   optional string robot_version = 2;
   // Permanent cloud devices.id; provision new devices with a UUID v4.
   optional string robot_id = 3;
+  // Optional direct Rust low-latency endpoint for 50-200 Hz ExternalControl.
+  optional string low_level_endpoint = 4;
 }
 
 enum HealthStatus {

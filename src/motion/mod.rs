@@ -1,6 +1,7 @@
 mod body;
 mod control;
 mod external;
+mod gesture;
 mod motors;
 mod odometry;
 mod posture;
@@ -15,6 +16,6 @@ mod watch;
 pub use external::ExternalControl;
 pub use teleop::Teleop;
 
-use crate::DosoClient;
+use crate::RobotClient;
 
-pub struct Motion<'a>(pub(crate) &'a DosoClient);
+pub struct Motion<'a>(pub(crate) &'a RobotClient);

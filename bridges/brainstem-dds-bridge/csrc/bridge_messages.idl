@@ -1,0 +1,136 @@
+// Subset of LingTu canonical DDS contracts (lingtu/src/message/idl/messages.idl)
+// used by the Board-A standalone Brainstem <-> LingTu CycloneDDS bridge.
+module lingtu {
+module dds {
+
+@final
+struct Time {
+  long sec;
+  unsigned long nanosec;
+};
+
+@final
+struct Header {
+  Time stamp;
+  string frame_id;
+};
+
+@final
+struct Vector3 {
+  double x;
+  double y;
+  double z;
+};
+
+@final
+struct Quaternion {
+  double x;
+  double y;
+  double z;
+  double w;
+};
+
+@final
+struct Twist {
+  Vector3 linear;
+  Vector3 angular;
+};
+
+@final
+struct Imu {
+  Header header;
+  Quaternion orientation;
+  double orientation_covariance[9];
+  Vector3 angular_velocity;
+  double angular_velocity_covariance[9];
+  Vector3 linear_acceleration;
+  double linear_acceleration_covariance[9];
+};
+
+@final
+struct JointState {
+  Header header;
+  string robot_model;
+  sequence<string> names;
+  sequence<double> position;
+  sequence<double> velocity;
+  sequence<double> effort;
+};
+
+@final
+struct DriverControlState {
+  Header header;
+  boolean connected;
+  boolean ready;
+  boolean motors_enabled;
+  boolean critical_fault;
+  boolean control_assured;
+  boolean lease_valid;
+  unsigned long lease_remaining_ms;
+  unsigned long long accepted_sequence;
+  boolean zero_output;
+  string fsm;
+  string owner;
+  string owner_id;
+  string reason;
+};
+
+@final
+struct MotionProfileRequest {
+  Header header;
+  string task_id;
+  string requirement;
+};
+
+@final
+struct MotionProfileState {
+  Header header;
+  string task_id;
+  string requirement;
+  string phase;
+  string requested_profile;
+  string active_profile;
+  string reason;
+};
+
+@final
+struct MotionPostureRequest {
+  Header header;
+  string host_boot_id;
+  string producer_boot_id;
+  unsigned long long source_boottime_ns;
+  string client_id;
+  string request_id;
+  long action;
+  long phase;
+  string profile_name;
+  string external_session_id;
+};
+
+@final
+struct MotionPostureAck {
+  Header header;
+  string producer_boot_id;
+  string client_id;
+  string request_id;
+  long action;
+  long phase;
+  string profile_name;
+  string external_session_id;
+  boolean final_result;
+  boolean accepted;
+  string reason;
+};
+
+@final
+struct FinalVelocityCommand {
+  string host_boot_id;
+  string producer_boot_id;
+  unsigned long long output_seq;
+  unsigned long long source_boottime_ns;
+  unsigned long long source_wall_ns;
+  Twist twist;
+};
+
+};
+};

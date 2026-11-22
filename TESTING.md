@@ -1,6 +1,24 @@
 # SDK 测试记录
 
-更新：2026-11-19。功能见[逐板块清单](docs/features.md)，现场检查见[七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)。
+更新于 2026-11-20。[逐板块清单](docs/features.md) · [七域真机验收矩阵](docs/REAL_ROBOT_ACCEPTANCE_MATRIX.md)
+
+## 2026-11-20 · THUNDER-DEV-001 的 5 GHz 局域网验收
+
+Windows 上的 Rust SDK 通过 `http://192.168.66.64:13145` 直连 Brainstem。机器狗的 `wlan0` 已接入 5320 MHz（信道 64），5 GHz 自动连接优先级为 50，原 2.4 GHz 配置优先级为 0。
+
+**15 分钟纯观测流对照通过。** 同一诊断版 SDK 在 2.4 GHz 上测得最长接收空窗 4.794 秒，切到 5 GHz 后降到 0.203 秒。5 GHz 窗口的 IMU 平均频率为 100.000 Hz，16 个关节轴各为 99.928–99.961 Hz，各路均无超过 2 秒的空窗。[切换记录与对照结果](D:/DOSO/artifacts/robot-cloud/wifi-5ghz-20261119T234955/RESULT.md)
+
+**15 分钟并发基线通过。** 01:01:57–01:16:57 CST，`rust` 提交 `54e9ae5` 的 release 示例 `measure_brainstem` 执行 `900 10`，跑满 900.000 秒，退出码 0。IMU 为 100.000 Hz，16 个关节轴各为 99.926–99.960 Hz。最长接收空窗分别为 269.473 ms 和 271.880 ms。全部 16 轴均超过 200 ms 抖动观察线，各路均未触及 2 秒判定线。约第 615 秒出现最长空窗时，IMU 的机端消息时间也相隔 271.700 ms。[逐轴与查询原始结果](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/sdk.log) · [命令与构建哈希](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/sdk-launch.json) · [退出记录](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/sdk-exit.json)
+
+每 10 秒读取控制状态、Profile、电压和电机状态，共 90 轮、360 次调用，全部成功。每轮 16/16 电机在线，共读到 1,440 个有限非零的电机母线电压值（53.09–54.78 V）。机端频率采样均为 5320 MHz，Brainstem 在窗口前后进程相同。1 小时扩展窗口待验。[机端运行版本](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/runtime.log) · [机端频段与进程](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/wifi.log)
+
+**连接与系统状态通过。** 01:17:03–01:17:05 CST，`read_brainstem` 独立读回 Grounded、电机输出关闭、控制方 None、无租约、无严重电机故障及当前 Profile，16 个电机 ID 0–15 均在线。本轮使用明文局域网端点，正式 mTLS 与设备三项身份另行验收。[系统状态快照](D:/DOSO/artifacts/robot-cloud/5ghz-concurrent-20261120/01-system-connect.json)
+
+### 开发者接入与离线回归
+
+独立 Windows 应用通过本地浅克隆取得 `v0.2.0`，用 Cargo path 依赖、Rust 1.94 和 `protoc` 34 离线编译成功。示例使用公开的状态、电压、电机、观测流接口和 mTLS 配置，构建与 `--help` 退出码均为 0。当前工作树的 12 个文档示例均通过编译。[独立消费者验证](D:/DOSO/artifacts/robot-cloud/sdk-offline-20261120/external-v0.2.0/README.md) · [文档测试](D:/DOSO/artifacts/robot-cloud/sdk-offline-20261120/quickstart-doctest.log)
+
+同一 SDK 源码的离线回归通过 13 个库测试、104 个 gRPC 合同测试和 6 个观测验收工具测试。Brainstem mTLS 的正反用例使用本机测试证书和测试服务。[命令与覆盖](D:/DOSO/artifacts/robot-cloud/sdk-offline-20261120/RESULT.md)
 
 ## 2026-11-19 · 0.2.0
 
@@ -119,7 +137,7 @@ Linux/Windows 的当前提交 CI 结果由 [GitHub Actions](https://github.com/K
 | localization | [location](tests/grpc/location.rs)、[task/state](tests/grpc/task_watch.rs)、[grpc.rs](tests/grpc.rs) | 真机 GNSS、源时间、真实地图定位与重定位 |
 | maps | [grpc.rs](tests/grpc.rs) 的地图/PCD/栅格/事务测试；Gateway 的 `test_grpc_map_content.py`、`test_grpc_map_grid.py` | mapd 实际落盘、加载与 Product 切换后补查、实机栅格/PCD |
 | navigation | [navigation](tests/grpc/navigation.rs)、[grpc.rs](tests/grpc.rs) 的任务/路线测试；Gateway 的 `test_grpc_navigation_options.py` | native 实际成路、真实到点、限速效果、暂停/取消停稳 |
-| observations | [observation_metadata](tests/grpc/observation_metadata.rs)、[formats](tests/message_formats.rs)、[grpc.rs](tests/grpc.rs) 的源事件/相机/点云；`examples/read_camera.rs`、`examples/watch_camera_samples.rs` | 15分钟并发长稳、加速度来源、当前部署关节索引、正式 5052 相机/内参、点云、手机渲染 |
+| observations | [observation_metadata](tests/grpc/observation_metadata.rs)、[formats](tests/message_formats.rs)、[grpc.rs](tests/grpc.rs) 的源事件/相机/点云；`examples/read_camera.rs`、`examples/watch_camera_samples.rs` | 1 小时并发长稳、加速度来源、当前部署关节索引、正式 5052 相机/内参、点云、手机渲染 |
 | tasks | [inspection](tests/grpc/inspection.rs)、[task_watch](tests/grpc/task_watch.rs)；Gateway 的 `test_grpc_inspection.py` 与原 HTTP 巡检回归 | 真机巡检轨迹/证据/报告和暂停恢复；统一跟随/Agent 历史尚无完整接口 |
 
 Gateway 测试文件位于相邻 `lingtu` 仓库，Rust 文件位于本仓库。原生服务未实际启动时，不能把测试替身的 ACK、路线或终态写为 native/真机验收。
@@ -228,3 +246,4 @@ App 侧 `cloud-video`、`native-video-acceptance`、`whep-receiver`、视频 sur
 - 光照、外设与充电桩缺真实适配器；姿态/步态、Recovery/阻尼缺完整执行链，详见[未完成能力](docs/features.md)。电源电压使用现有电机母线接口。
 - 相机源内参的旋转畸变系数沿用原实现；标定数值、坐标轴及其与 JPEG 预览的几何对齐仍须实机验收。
 - 单关节 gRPC 统一索引已在当前 Brainstem 源码核对，现场 flowfix10 是否包含归一化尚未确认；不能把旧事件 ID 直接当 External 目标索引。
+一小时扩展窗口于 05:00:32 CST 启动，原计划 3600 秒、360 轮、1,440 次调用。开发机在窗口完成前意外重启，SDK 没有写出最终统计，结果记为 `INCOMPLETE`，不计入通过。[中断记录](D:/DOSO/artifacts/robot-cloud/5ghz-1h-20261120/RESULT.md)

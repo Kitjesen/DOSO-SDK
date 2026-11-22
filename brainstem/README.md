@@ -58,6 +58,8 @@ The public surface deliberately stays small:
   `result.confirmsStop()` means both operations were confirmed.
 - `standUp()` and `sitDown()` stop and release locomotion first if this client
   owns the lease, then submit the posture action.
+- `damp()` immediately triggers the server's analytical soft emergency stop
+  (`Damp`), ramping into pure joint damping and clearing any local lease state.
 - `enableMotors()`, `disableMotors()`, `setJointZero()`, and
   `clearMotorFaults()` expose authenticated hardware maintenance operations.
 - `getServerStartTime()`, `getBodyState()`, `getMotorStatus()`, and
@@ -120,14 +122,14 @@ populates all slots; later single-joint messages update only their own slot.
 `complete()` before assuming all 16 positions are known.
 
 Motor temperature, per-motor voltage, faults, and aggregate voltage are
-request/response data in `brainstem_api` 2.2, not streams. Read them when needed
+request/response data in `brainstem_api` 2.4, not streams. Read them when needed
 with `getMotorStatus()` and `getVoltage()`; they do not require
 `startTelemetry()` or a locomotion lease.
 
 The IMU cache contains body-frame angular velocity in rad/s, a
 `orientation_world_to_body` quaternion in `w/x/y/z` order, and
 session-relative `server_elapsed`. The body frame is right-handed: +X forward,
-+Y left, +Z up. With a 2.2
++Y left, +Z up. With a 2.2+
 Server it also contains body-frame linear acceleration in m/s². The acceleration
 is an `std::optional`: it is empty when connected to a compatible older Server
 that does not send field 4.
@@ -140,7 +142,7 @@ The SDK currently returns these public types:
 | --- | --- |
 | `connect()` / `controlState()` | Connectivity, typed body state, software motor-output gate/fault, motion readiness, lease owner and remaining time, command sequence, accepted/rejected counts. |
 | `getServerStartTime()` | Brainstem process start time as a UTC `system_clock::time_point`; use it to detect a Server restart and invalidate session-relative assumptions. |
-| `getBodyState()` / managed or raw body-state stream | Grounded, standing, walking, transitioning, and active posture/gesture transition. |
+| `getBodyState()` / managed or raw body-state stream | Grounded, standing, walking, damping, transitioning, and active posture/gesture transition. |
 | `getMotorStatus()` | Per-motor online flag, status code, temperature, voltage, position, velocity, torque, and error codes. |
 | `getVoltage()` | Voltage values in Brainstem protocol order. |
 | managed or raw IMU stream | Body-frame angular velocity in rad/s, optional linear acceleration in m/s², orientation quaternion, and session-relative timestamp. |
@@ -208,6 +210,7 @@ and isolated tests. Production remote motion uses mutual TLS.
 | internal control ownership | `refresh()` manages an explicit lease |
 | `Move(vx, vy, wz)` | `move({vx_mps, vy_mps, yaw_rad_s})` |
 | `StopMove()` | confirmed checked-zero plus lease release |
+| `Damp()` | `damp()` |
 | `StandUp()` | `standUp()` |
 | `Sit()` | `sitDown()` |
 | typed state subscriptions | body-state, IMU, and joint subscriptions |
@@ -253,7 +256,7 @@ find_package(BrainstemClient CONFIG REQUIRED)
 target_link_libraries(my_robot PRIVATE brainstem::client)
 ```
 
-The repository vendors the exact `brainstem_api` 2.2 input files used for code
+The repository vendors the exact `brainstem_api` 2.4 input files used for code
 generation under `protocol/`; consumers do not need the Brainstem monorepo or a
 protocol submodule.
 
@@ -307,28 +310,29 @@ listed joints.
 ```
 
 Available commands are `enable`, `disable`, `set-zero`, `clear-faults`,
-`clear-faults:<ids>`, `stand-up`, and `sit-down`. Joint zero remains guarded by
-the Server and succeeds only while the body is grounded.
+`clear-faults:<ids>`, `stand-up`, `sit-down`, and `damp`. Joint zero remains
+guarded by the Server and succeeds only while the body is grounded.
 
 ## Current limits
 
-- Brainstem inference history, robot parameters, and profile management do not
-  yet have public DOSO SDK facades.
-- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.2 and
+- Brainstem inference history and robot parameters do not yet have public
+  C++ SDK facades.
+- Camera, LiDAR, odometry, and maps are not present in `brainstem_api` 2.4 and
   therefore do not come from this SDK.
 - Managed streams do not reconnect silently. If `active` becomes false, call
   `startTelemetry()` again with the desired selection; cached freshness remains
   explicit.
-- Gesture and speed-mode RPC names exist in the protocol, but Brainstem Server
-  currently returns `UNIMPLEMENTED`; they are not advertised as SDK features.
-- No recover-stand or damping action because Brainstem Server does not yet
-  define those remote RPCs.
-- `standUp()` and `sitDown()` confirm RPC acceptance, not physical completion.
+- Speed-mode RPCs (`GetSpeedMode`/`SetSpeedMode`) currently return
+  `UNIMPLEMENTED` on the Server; `ListGestures`/`PlayGesture` are implemented
+  on `brainstem_api` 2.4 Servers via Rust/native RPC.
+- `RobotRecovery` stays disabled in `brainstem.env` (`THUNDER_RECOVERY_MODEL_CONFIG` unset) until recovery model acceptance completes; `RobotExternalControl` is implemented in Brainstem `v0.0.1` (`HardwareExternal` + `RealJoint` 5-term MIT SafetyGate, pending live `192.168.66.64` deployment/acceptance).
+- `standUp()`, `sitDown()`, and `damp()` confirm RPC acceptance (with `damp()`
+  ramping to zeroed leg `Kp` / pure damping and converging to `Grounded`).
 - The client destructor performs a best-effort stop and may wait up to the
   configured RPC timeout when it still owns a lease.
 
 The SDK version is `0.6.0`; its bundled protocol contract is `brainstem_api`
-`2.2.0`.
+`v0.0.1` (`0.0.1`).
 
 ## Controller profiles (0.6)
 

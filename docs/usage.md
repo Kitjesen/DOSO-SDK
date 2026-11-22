@@ -1,6 +1,6 @@
 # DOSO Rust SDK
 
-`doso-sdk` 是 V1 的异步 Rust 客户端。运动和实时观测优先通过 `BrainstemClient` 以 **gRPC + Protobuf** 直连机器狗 `13145`；地图、SLAM、导航和任务等高层能力由可选的 `DosoClient` 连接 LingTu Gateway。两套客户端共用错误类型，但协议和服务端职责不同。
+`doso-sdk` 通过统一客户主入口 **`RobotClient`**（保留 `DosoClient` 兼容别名）以 **gRPC + Protobuf** 对接整机服务，覆盖高层运动控制、实时遥测与空间导航。内部直连板 A 端口的能力收口于 `doso_sdk::internal::motion_board`。
 
 本页提供构建与常用调用流程。完整函数签名、参数、返回和失败行为按领域维护于API手册。[API手册](api/README.md)
 
@@ -8,12 +8,12 @@
 
 需要 Rust 1.94 或更新版本，以及 PATH 中可用的 `protoc`。也可以用 `PROTOC` 环境变量指定编译器路径。`build.rs` 从本 crate 的 `proto/` 和内置 `brainstem/protocol/` 生成 Rust 类型和客户端；Cargo.lock 固定仓库已解析的依赖版本。
 
-在 DOSO-SDK 根目录执行：
+在电脑上的 DOSO-SDK 根目录执行。下例中的 `192.168.66.64` 是研发机的局域网地址，使用其他机器狗时替换为它的地址。
 
 ```text
 cargo build --workspace --locked
 cargo test --workspace --locked
-cargo run -p doso-sdk --example read_brainstem -- http://127.0.0.1:13145
+cargo run -p doso-sdk --example read_status -- http://192.168.66.64:5052
 ```
 
 在应用的 Cargo.toml 中固定 SDK 版本，并启用 Tokio 运行时：
@@ -25,6 +25,30 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 本地开发可将 SDK 依赖改为 `doso-sdk = { path = "../DOSO-SDK" }`，路径相对于应用的 Cargo.toml。库通过 Cargo 依赖集成，目前未发布到 crates.io。
+
+### 通过 `RobotClient` 连接整机
+
+下面的应用连接机器人对外 `:5052` 服务，读取电机母线电压并订阅 IMU 数据流：
+
+```rust,no_run
+use doso_sdk::RobotClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let robot = RobotClient::connect("http://192.168.66.64:5052").await?;
+    println!("电机母线电压（V） {:?}", robot.observations().motor_voltages().await?.volts);
+    let mut imu = robot.observations().watch_imu().await?;
+    let frame = imu.message().await?.ok_or("IMU 流已结束")?;
+    println!("机身角速度（rad/s） {:?}", frame.angular_velocity_rad_s);
+    Ok(())
+}
+```
+
+开发局域网示例使用明文 HTTP/2 gRPC。连接启用 mTLS 的设备时，请使用设备证书对应的主机名以及配对的客户端证书。[Brainstem 直连与 mTLS](api/brainstem.md)
+
+### 可选的 LingTu 高层服务
+
+设备部署了 LingTu Gateway 后，通过 `DosoClient` 读取身份、地图和定位。下例假设应用和 Gateway 在同一主机上运行。
 
 ```rust,no_run
 use doso_sdk::{DosoClient, Result};
@@ -45,7 +69,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-`http://` 使用 HTTP/2 明文 gRPC 和 Protobuf。`DosoClient::connect().await` 建立通道后完成只读 `System.Handshake`。机器狗上的本地程序可使用 `BrainstemClient::connect("http://127.0.0.1:13145")`。从电脑连接配置了 mTLS 的机器狗时，使用 `https://` 和已配对的客户端证书。[直连 API](api/brainstem.md)
+`DosoClient::connect().await` 建立通道后完成只读 `System.Handshake`。
 
 `system().info()` 同步借用最近成功握手的 `SystemInfo`，包含固件版本 `firmware_version`、机器人版本 `robot_version` 和机器人 ID `robot_id`。固件版本取当前运行发布包 `metadata.json.version`，机器人版本取 RunPlan 或 `LINGTU_ROBOT` 中的型号，机器人 ID 读取设备端 `DOSO_DEVICE_ID`。缺失项返回 `None`；非空 ID 不是规范 UUID v4 时，握手返回 `FAILED_PRECONDITION` 和 `invalid_robot_id`。具体来源与统一发布规则见[机器人信息与固件发布](release.md)。
 

@@ -1,0 +1,71 @@
+# /etc/systemd/system/brainstem.service
+#
+# DRAFT 2026-11-20 — 唯一的 Brainstem systemd 配置（THUNDER-DEV-001）
+#
+# 目标：替换现在的 brainstem.service 和 brainstem.service.d/ 下 31 个叠加的 drop-in。
+# 原则：
+#   1. 只有这一个 unit 文件，brainstem.service.d/ 必须为空。
+#   2. 所有运行参数只来自 /etc/brainstem/brainstem.env。
+#   3. 二进制只来自 /opt/brainstem/current（指向 releases/<commit>）。
+#   4. 运行数据只来自 /opt/brainstem/data；日志写 /var/log/brainstem。
+#   5. 第一次切换必须与 2026-11-20 现场行为等价（见 README.md 的映射表），
+#      安全/传输策略的改变放到后续单独变更里做。
+#
+# 升级方式：上传新 release 到 /opt/brainstem/releases/<commit>，切换 current 软链，
+#           systemctl restart brainstem。禁止再新增 drop-in。
+
+[Unit]
+Description=Brainstem robot runtime (THUNDER-DEV-001)
+Documentation=file:///opt/brainstem/current/manifest.json
+Requires=brainstem-can.service
+After=network-online.target brainstem-can.service
+Wants=network-online.target
+# 与旧控制进程互斥：它们同样会占用 CAN / 13145
+Conflicts=thunder-web.service brainstem-grpc-proxy.service
+Conflicts=bodyheight-ctrl.service bodyheight-ctrl@08.service bodyheight-ctrl@11.service
+# 与现场一致：300 秒内最多重启 8 次
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=sunrise
+Group=sunrise
+
+# 物理核隔离（Stage 0）：独占 Core 4-5，避开 Core 0-3 上的相机/视频/网络负载；
+# Dart VM 阶段不设进程级 SCHED_FIFO，防止后台 GC Worker 线程抢占同核 SocketCAN 收发。
+CPUAffinity=4 5
+Nice=-20
+LimitMEMLOCK=infinity
+LimitRTPRIO=90
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+
+# 工作目录与日志：thunder 默认把日志写到 <cwd>/logs，现在改为显式 THUNDER_LOG_DIR
+WorkingDirectory=/var/lib/brainstem
+StateDirectory=brainstem
+LogsDirectory=brainstem
+
+EnvironmentFile=/etc/brainstem/brainstem.env
+
+# 0) 映射 profile 中的相对 modelPath（如 model/thunder_*.onnx）到版本化数据目录
+ExecStartPre=/bin/ln -sfn /opt/brainstem/data/model /var/lib/brainstem/model
+# 1) 等待 Wi-Fi 单播地址可绑定（避免 2026-11-14 的 errno 99）
+ExecStartPre=/usr/bin/python3 /opt/brainstem/libexec/wait-lan-address.py
+# 2) 以 + root 权限确认并自愈恢复 4 路 PCAN UP@1Mbps 及 IMU 设备（断线重枚举后可自恢复，不发送任何 CAN 帧）
+ExecStartPre=+/usr/bin/python3 /opt/brainstem/libexec/can-check.py
+
+ExecStart=/opt/brainstem/current/bin/thunder
+
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+NoNewPrivileges=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=brainstem
+
+[Install]
+WantedBy=multi-user.target
