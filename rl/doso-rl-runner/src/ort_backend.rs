@@ -622,7 +622,13 @@ mod tests {
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let add_one = root.join("../../../brainstem/onnx_runtime/test/add_one.onnx");
-        assert!(add_one.exists(), "missing {}", add_one.display());
+        if !add_one.exists() {
+            eprintln!(
+                "skipping sibling brainstem ONNX fixture test ({} not present in standalone checkout)",
+                add_one.display()
+            );
+            return;
+        }
         let mut backend_add = OrtDynamicBackend::load(&add_one, Some(&dll)).unwrap();
         let in_dim = backend_add.input_dim();
         let out_add = backend_add.infer(&vec![2.5_f32; in_dim]).unwrap();
