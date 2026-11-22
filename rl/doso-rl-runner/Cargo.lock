@@ -230,6 +230,7 @@ dependencies = [
  "anyhow",
  "clap",
  "doso-sdk",
+ "doso-shm-ipc",
  "libloading",
  "prost-types",
  "serde",
@@ -252,6 +253,13 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "doso-shm-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

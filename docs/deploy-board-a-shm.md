@@ -147,3 +147,26 @@ sudo systemctl restart brainstem-dds-bridge.service
   sudo ln -sfn /opt/brainstem/releases/v0.0.0-baseline /opt/brainstem/current
   sudo systemctl restart brainstem.service brainstem-dds-bridge.service
   ```
+
+---
+
+## 5. 进阶：同板 `doso-rl-runner` 直连 `/dev/shm` + 实机 P99 压测与 IRQ 绑核
+
+当 ONNX RL 策略直接跑在运控 A 板（或同机）时，可开启 `doso-rl-runner --shm-enabled`：
+- **控制面**仍走 `RobotClient`（`:5052` → Brainstem `Enter`/`Enable`/`Disable`/`Exit` + `input_window` + 心跳）；
+- **数据面**跳过 `:5052` 边车和 loopback TCP，直接 `Brainstem (/dev/shm/doso_proprio_v1)` → `doso-rl-runner (ONNX)` → `(/dev/shm/doso_ext_cmd_v1)` → `Brainstem HardwareExternal`；若 SHM 未打开则自动回退 gRPC。
+
+```bash
+# 1. 同板零拷贝 200Hz 运行 RL 策略并输出 P50 / P99 / P99.9 步长与推理延迟
+DOSO_SHM_IPC_ENABLED=true \
+  ./doso-rl-runner --endpoint http://127.0.0.1:5052 \
+  --deploy-yaml /opt/brainstem/data/profiles/deploy.yaml \
+  --shm-enabled
+
+# 2. 在 A 板上实测无锁共享内存写/读与 200Hz 定时唤醒抖动（P50 / P99 / P99.9）
+cargo run --manifest-path bridges/doso-shm-ipc/Cargo.toml --release --example shm_bench -- --hz 200 --frames 1000
+
+# 3. 锁定 CPU performance 频率并将 CAN/USB-PCAN 中断绑定到 Core 4-5（避开 Core 0-3 相机负载）
+sudo /opt/brainstem/libexec/tune-realtime-irq.sh
+```
+
