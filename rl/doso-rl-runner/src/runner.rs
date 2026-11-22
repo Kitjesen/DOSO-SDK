@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{DeployConfig, NUM_JOINTS};
 use crate::obs::{
-    policy_actions_to_joint_commands, projected_gravity_from_quat_wxyz, ObservationBuilder,
+    policy_actions_to_joint_commands_into, projected_gravity_from_quat_wxyz, ObservationBuilder,
 };
 use crate::ort_backend::PolicyBackend;
 
@@ -326,8 +326,9 @@ impl RlRunner {
         };
 
         // Submit safe initial hold frame before enabling motor outputs.
-        let initial_hold = interpolate_fix_stand(&q_initial, &self.config.deploy, 0.0);
-        if let Err(err) = submit_commands(&mut ext, shm_plane.as_mut(), initial_hold) {
+        let mut initial_hold = [JointCommand::damping(0.0); NUM_JOINTS];
+        interpolate_fix_stand_into(&q_initial, &self.config.deploy, 0.0, &mut initial_hold);
+        if let Err(err) = submit_commands(&mut ext, shm_plane.as_mut(), &initial_hold) {
             safe_damp_and_close(Some(ext), shm_plane.as_mut(), robot, &self.config.deploy).await;
             return Err(err);
         }
@@ -349,6 +350,10 @@ impl RlRunner {
         let mut fix_stand_steps = 0_u64;
         let mut policy_steps = 0_u64;
         let mut last_action_policy = [0.0_f32; NUM_JOINTS];
+        let mut obs_buf = vec![0.0_f32; self.config.deploy.obs_dim()];
+        let mut raw_action_buf = [0.0_f32; NUM_JOINTS];
+        let mut clipped_buf = [0.0_f32; NUM_JOINTS];
+        let mut cmd_buf = [JointCommand::damping(0.0); NUM_JOINTS];
         let mut step_latency = LatencyRecorder::default();
         let mut infer_latency = LatencyRecorder::default();
         let mut tick_jitter = LatencyRecorder::default();
@@ -440,8 +445,15 @@ impl RlRunner {
                             let alpha = (fix_stand_started.elapsed().as_secs_f64()
                                 / self.config.deploy.fix_stand_duration_s)
                                 .clamp(0.0, 1.0);
-                            let cmds = interpolate_fix_stand(&q_initial, &self.config.deploy, alpha);
-                            if let Err(err) = submit_commands(ext_ref, shm_plane.as_mut(), cmds) {
+                            interpolate_fix_stand_into(
+                                &q_initial,
+                                &self.config.deploy,
+                                alpha,
+                                &mut cmd_buf,
+                            );
+                            if let Err(err) =
+                                submit_commands(ext_ref, shm_plane.as_mut(), &cmd_buf)
+                            {
                                 mode = RunnerMode::SoftDamp;
                                 break (true, format!("FixStand publish failed: {err}"));
                             }
@@ -457,43 +469,42 @@ impl RlRunner {
                                 self.config.target_cmd,
                                 &self.config.deploy,
                             );
-                            let obs = match self.obs_builder.push_and_build(
+                            if let Err(err) = self.obs_builder.push_and_build_into(
                                 imu.ang_vel,
                                 proj_grav,
                                 cmd_vel,
                                 &joints.q,
                                 &joints.dq,
                                 &last_action_policy,
+                                &mut obs_buf,
                             ) {
-                                Ok(o) => o,
-                                Err(err) => {
-                                    mode = RunnerMode::SoftDamp;
-                                    break (true, format!("observation error: {err}"));
-                                }
-                            };
+                                mode = RunnerMode::SoftDamp;
+                                break (true, format!("observation error: {err}"));
+                            }
                             let infer_start = Instant::now();
-                            let raw_action = match self.backend.infer(&obs) {
-                                Ok(a) => a,
-                                Err(err) => {
-                                    mode = RunnerMode::SoftDamp;
-                                    break (true, format!("inference error: {err}"));
-                                }
-                            };
+                            if let Err(err) = self.backend.infer_into(&obs_buf, &mut raw_action_buf)
+                            {
+                                mode = RunnerMode::SoftDamp;
+                                break (true, format!("inference error: {err}"));
+                            }
                             infer_latency.record(infer_start.elapsed().as_micros() as u64);
-                            let (clipped, cmds) =
-                                match policy_actions_to_joint_commands(&raw_action, &self.config.deploy) {
-                                    Ok(pair) => pair,
-                                    Err(err) => {
-                                        mode = RunnerMode::SoftDamp;
-                                        break (true, format!("action safety error: {err}"));
-                                    }
-                                };
-                            if let Err(err) = submit_commands(ext_ref, shm_plane.as_mut(), cmds) {
+                            if let Err(err) = policy_actions_to_joint_commands_into(
+                                &raw_action_buf,
+                                &self.config.deploy,
+                                &mut clipped_buf,
+                                &mut cmd_buf,
+                            ) {
+                                mode = RunnerMode::SoftDamp;
+                                break (true, format!("action safety error: {err}"));
+                            }
+                            if let Err(err) =
+                                submit_commands(ext_ref, shm_plane.as_mut(), &cmd_buf)
+                            {
                                 mode = RunnerMode::SoftDamp;
                                 break (true, format!("policy publish failed: {err}"));
                             }
                             step_latency.record(tick_start.elapsed().as_micros() as u64);
-                            last_action_policy = clipped;
+                            last_action_policy = clipped_buf;
                             policy_steps += 1;
                             if let Some(limit) = self.config.max_steps {
                                 if fix_stand_steps + policy_steps >= limit {
@@ -554,33 +565,32 @@ fn resolve_cmd_vel(
     fallback
 }
 
-fn interpolate_fix_stand(
+fn interpolate_fix_stand_into(
     q_initial: &[f64; NUM_JOINTS],
     cfg: &DeployConfig,
     alpha: f64,
-) -> Vec<JointCommand> {
-    (0..NUM_JOINTS)
-        .map(|hw_idx| {
-            if cfg.is_wheel(hw_idx) {
-                JointCommand::wheel_vel(0.0, cfg.damping[hw_idx])
-            } else {
-                let q_target =
-                    (1.0 - alpha) * q_initial[hw_idx] + alpha * cfg.default_joint_pos[hw_idx];
-                JointCommand::leg_pd(q_target, cfg.stiffness[hw_idx], cfg.damping[hw_idx])
-            }
-        })
-        .collect()
+    out: &mut [JointCommand; NUM_JOINTS],
+) {
+    for (hw_idx, slot) in out.iter_mut().enumerate() {
+        *slot = if cfg.is_wheel(hw_idx) {
+            JointCommand::wheel_vel(0.0, cfg.damping[hw_idx])
+        } else {
+            let q_target =
+                (1.0 - alpha) * q_initial[hw_idx] + alpha * cfg.default_joint_pos[hw_idx];
+            JointCommand::leg_pd(q_target, cfg.stiffness[hw_idx], cfg.damping[hw_idx])
+        };
+    }
 }
 
 fn submit_commands(
     ext: &mut ExternalControl<'_>,
     shm: Option<&mut ShmDataPlane>,
-    cmds: Vec<JointCommand>,
+    cmds: &[JointCommand],
 ) -> Result<()> {
     if let Some(plane) = shm {
-        plane.publish_commands(ext, &cmds)
+        plane.publish_commands(ext, cmds)
     } else {
-        ext.publish_joints(cmds, None)?;
+        ext.publish_joints(cmds.to_vec(), None)?;
         Ok(())
     }
 }
@@ -666,10 +676,11 @@ async fn safe_damp_and_close(
     cfg: &DeployConfig,
 ) {
     if let Some(ext) = ext_opt.as_mut() {
-        let damp_frame: Vec<JointCommand> = (0..NUM_JOINTS)
-            .map(|i| JointCommand::damping(cfg.damping[i]))
-            .collect();
-        let _ = submit_commands(ext, shm, damp_frame);
+        let mut damp_frame = [JointCommand::damping(0.0); NUM_JOINTS];
+        for (i, slot) in damp_frame.iter_mut().enumerate() {
+            *slot = JointCommand::damping(cfg.damping[i]);
+        }
+        let _ = submit_commands(ext, shm, &damp_frame);
         let _ = ext.disable(None).await;
     }
     if let Some(ext) = ext_opt.take() {
