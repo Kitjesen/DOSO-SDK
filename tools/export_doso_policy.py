@@ -2,8 +2,9 @@
 """DOSO Policy Packager, Inspector & 1-Second Zero-Restart Hot Deployment Tool.
 
 Usage examples:
-  1. Inspect any exported ONNX checkpoint (tensor names, shapes, SHA256, preset match):
+  1. Inspect any exported ONNX checkpoint or policy package directory:
      python tools/export_doso_policy.py inspect ./policy.onnx
+     python tools/export_doso_policy.py inspect ./models/packages/flat_w5
 
   2. 1-command end-to-end deploy (inspect + shorthand YAML + 2-step Golden + hot-push):
      python tools/export_doso_policy.py deploy ./policy.onnx \
@@ -212,7 +213,7 @@ model:
   file: "model.onnx"
   sha256: "{sha256}"
   step_dt_s: 0.02
-kinematics:
+posture:
   standing_pose: [-0.1, -0.8, 1.8, 0.1, 0.8, -1.8, 0.1, 0.8, -1.8, -0.1, -0.8, 1.8, 0.0, 0.0, 0.0, 0.0]
 inputs:
   - tensor: "@0"
@@ -572,7 +573,7 @@ def build_shorthand_yaml(
     ]
     if preset.override_standing_pose:
         sp_str = ", ".join(_fmt_num(x) for x in preset.standing_pose)
-        lines.append("kinematics:")
+        lines.append("posture:")
         lines.append(f"  standing_pose: [{sp_str}]")
 
     lines.append("inputs:")
@@ -819,8 +820,36 @@ def post_json(url: str, payload: dict) -> dict:
 
 # ─── CLI Subcommand Handlers ─────────────────────────────────────────────────
 
+def _parse_manifest_field(yaml_text: str, key: str) -> str | None:
+    prefix = f"{key}:"
+    for line in yaml_text.splitlines():
+        s = line.strip()
+        if s.startswith(prefix):
+            return s.split(":", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
 def cmd_inspect(args: argparse.Namespace) -> int:
-    onnx_src = Path(args.onnx).resolve()
+    target = Path(args.onnx).resolve()
+    pkg_dir: Path | None = None
+    manifest_name: str | None = None
+    manifest_sha: str | None = None
+
+    if target.is_dir():
+        pkg_dir = target
+        manifest_path = pkg_dir / "policy.yaml"
+        model_rel = "model.onnx"
+        if manifest_path.is_file():
+            yaml_text = manifest_path.read_text(encoding="utf-8")
+            manifest_name = _parse_manifest_field(yaml_text, "name")
+            manifest_sha = _parse_manifest_field(yaml_text, "sha256")
+            parsed_file = _parse_manifest_field(yaml_text, "file")
+            if parsed_file:
+                model_rel = parsed_file
+        onnx_src = (pkg_dir / model_rel).resolve()
+    else:
+        onnx_src = target
+
     if not onnx_src.is_file():
         print(f"ERROR: ONNX file not found: {onnx_src}", file=sys.stderr)
         return 1
@@ -829,9 +858,14 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     in_dims = [t.feature_dim for t in info.inputs]
     suggested = suggest_preset_for_dims(in_dims)
 
+    if pkg_dir is not None:
+        print(f"Package: {pkg_dir}" + (f" (name={manifest_name})" if manifest_name else ""))
     print(f"File:    {onnx_src}")
     print(f"Size:    {info.size_bytes:,} bytes ({info.size_bytes / 1024.0:.1f} KiB)")
     print(f"SHA256:  {info.sha256}")
+    if manifest_sha:
+        status = "MATCH" if manifest_sha.lower() == info.sha256.lower() else f"MISMATCH (manifest={manifest_sha})"
+        print(f"Verify:  policy.yaml sha256 {status}")
     print(f"Backend: {info.backend}")
     print(f"Inputs ({len(info.inputs)}):")
     for idx, t in enumerate(info.inputs):
@@ -993,8 +1027,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="DOSO zero-restart policy inspector, packager & 1s deployer")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_insp = sub.add_parser("inspect", help="Inspect ONNX input/output tensor names, shapes, and SHA256")
-    p_insp.add_argument("onnx", help="Path to .onnx checkpoint file")
+    p_insp = sub.add_parser("inspect", help="Inspect an .onnx file or policy package directory")
+    p_insp.add_argument("onnx", help="Path to .onnx checkpoint file or policy package directory")
     p_insp.set_defaults(func=cmd_inspect)
 
     p_dep = sub.add_parser("deploy", help="1-command inspect + shorthand YAML + auto-Golden + hot-push")

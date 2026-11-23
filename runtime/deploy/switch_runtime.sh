@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-RUST_RELEASE="${RUST_RELEASE:-/opt/doso/releases/v1.0.0-rust}"
+RUST_RELEASE="${RUST_RELEASE:-/opt/doso/releases/v0.0.1}"
 CURRENT_LINK="${CURRENT_LINK:-/opt/doso/current}"
 LAST_GOOD_LINK="${LAST_GOOD_LINK:-/opt/doso/last-known-good}"
 DART_RELEASE="${DART_RELEASE:-/opt/brainstem/releases/v0.0.2-unified}"
