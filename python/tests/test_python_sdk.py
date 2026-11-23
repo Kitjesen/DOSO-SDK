@@ -37,6 +37,25 @@ class PythonSdkTest(unittest.TestCase):
                 self.assertTrue(caps.low_level)
                 self.assertTrue(caps.observations)
                 self.assertTrue(caps.board_b_autonomy)
+                self.assertTrue(caps.voice)
+
+                vst = robot.voice().status()
+                self.assertEqual(vst.service, "askme")
+                self.assertEqual(vst.llm_model, "deepseek-v4-flash")
+                vprofs = robot.voice().list_profiles()
+                self.assertEqual(vprofs.active_profile, "patrol_default")
+                self.assertEqual(vprofs.profiles[0].label, "巡检播报")
+                robot.voice().switch_profile("patrol_default")
+                pb_id = robot.voice().speak("系统自检通过")
+                self.assertEqual(pb_id, "pb-mock-1")
+                pb = robot.voice().playback_status(pb_id)
+                self.assertEqual(pb.state, "completed")
+                robot.voice().cancel_playback(pb_id, "test")
+                robot.voice().switch_component("llm", "deepseek", "deepseek-v4-flash")
+                robot.voice().update_prompt("你是小算机器狗。")
+                chat_reply = robot.voice().chat("你好")
+                self.assertEqual(chat_reply.reply_text, "收到: 你好")
+                self.assertEqual(chat_reply.thread_id, "conv-mock-1")
 
                 status = robot.sport().control_status()
                 self.assertEqual(status.body_kind, 1)  # Grounded
@@ -76,6 +95,27 @@ class PythonSdkTest(unittest.TestCase):
                 robot.sport().damp()
                 robot.sport().play_gesture("bow")
                 robot.sport().clear_motor_fault()
+
+                bh = robot.sport().body_height_status()
+                self.assertTrue(bh.supported)
+                self.assertAlmostEqual(bh.current_height_m, 0.375, places=5)
+                self.assertAlmostEqual(bh.min_height_m, 0.25, places=5)
+                self.assertAlmostEqual(bh.max_height_m, 0.50, places=5)
+                bh2 = robot.sport().set_body_height(0.42)
+                self.assertTrue(bh2.supported)
+                self.assertAlmostEqual(bh2.target_height_m, 0.42, places=5)
+                with self.assertRaises(DosoError):
+                    robot.sport().set_body_height(0.99)
+
+                rec = robot.sport().recovery_status()
+                self.assertEqual(rec.availability, 2)
+                rec_enter = robot.sport().recovery_enter("rec-op-1")
+                self.assertTrue(rec_enter.selected)
+                self.assertEqual(rec_enter.session_token, "rec-mock-tok")
+                robot.sport().recovery_heartbeat(rec_enter.session_token)
+                rec_exit = robot.sport().recovery_exit(rec_enter.session_token)
+                self.assertFalse(rec_exit.selected)
+                self.assertTrue(rec_exit.motor_disable_confirmed)
 
                 with robot.sport().take_control() as teleop:
                     teleop.send_velocity(0.3, 0.0, 0.1, deadman=True)

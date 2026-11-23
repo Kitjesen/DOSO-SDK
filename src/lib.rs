@@ -16,6 +16,7 @@ mod navigation;
 mod observations;
 mod system;
 mod tasks;
+mod voice;
 
 pub mod rpc {
     tonic::include_proto!("doso.v1");
@@ -34,7 +35,7 @@ pub use client::{Config, DosoClient, RobotClient, RobotConfig};
 pub use common::new_request_id;
 pub use error::{Error, ErrorKind, Result, Terminal};
 pub use internal::motion_board::{
-    MotionBoardClient, MotionBoardConfig, MotionBoardExternalClient,
+    MotionBoardClient, MotionBoardConfig, MotionBoardExternalClient, MotionBoardRecoveryClient,
     DEFAULT_ENDPOINT as MOTION_BOARD_DEFAULT_ENDPOINT,
 };
 pub use localization::Localization;
@@ -43,19 +44,25 @@ pub use motion::{ExternalControl, Motion, Teleop};
 pub use navigation::{GoalOptions, Navigation};
 pub use observations::{CloudStreamKind, Observations, PointCloud};
 pub use rpc::{
-    BatteryState, BodyControlOwner, BodyControlStatus, BodyKind, BodyState, BodyTransition,
-    CameraCalibration, CameraFrame, CameraInfo, CameraSample, ClearMotorFaultRequest, CloudFrame,
-    CloudKind, ControlState, ControllerMode, ControllerState, Fault, FaultReport, FaultSeverity,
-    FootContact, GeographicFix, GeographicLocation, GeographicState, GestureInfo, GestureList,
-    HealthStatus, ImuSample, InspectionBinding, InspectionRoute, InspectionRoutes, InspectionTask,
-    InspectionTaskListQuery, InspectionTasks, JointCommand, JointSample, JointState, LightSample,
-    LocalizationQuality, LocalizationState, MapContent, MapContentInfo, MapGrid, MapOperation,
-    MapState, MotorState, MotorStates, MotorVoltagesResponse, NavigationPath, OdometrySample,
-    PlanPreview, PlayGestureRequest, Pose, ProductOperation, ProductState, ProductStatus,
-    ProfileInfo, Quaternion, ReadinessState, Receipt as CommandReceipt, RemoteState, RobotStatus,
-    SampleTime, SystemInfo, Task, TaskRunState, TaskRunStatus, TaskState, TeleopReply,
-    TeleopVelocity, Vector3, VelocitySample,
+    BatteryState, BodyControlOwner, BodyControlStatus, BodyHeightStatus, BodyKind, BodyState,
+    BodyTransition, CameraCalibration, CameraFrame, CameraInfo, CameraSample,
+    ClearMotorFaultRequest, CloudFrame, CloudKind, ControlState, ControllerMode, ControllerState,
+    Fault, FaultReport, FaultSeverity, FootContact, GeographicFix, GeographicLocation,
+    GeographicState, GestureInfo, GestureList, HealthStatus, ImuSample, InspectionBinding,
+    InspectionRoute, InspectionRoutes, InspectionTask, InspectionTaskListQuery, InspectionTasks,
+    JointCommand, JointSample, JointState, LightSample, LocalizationQuality, LocalizationState,
+    MapContent, MapContentInfo, MapGrid, MapOperation, MapState, MotorState, MotorStates,
+    MotorVoltagesResponse, NavigationPath, OdometrySample, PlanPreview, PlayGestureRequest, Pose,
+    ProductOperation, ProductState, ProductStatus, ProfileInfo, Quaternion, ReadinessState,
+    Receipt as CommandReceipt, RecoveryActionReply, RecoveryCancelRequest, RecoverySessionRequest,
+    RecoveryStartRequest, RecoveryStatus, RemoteState, RobotStatus, SampleTime,
+    SetBodyHeightRequest, SystemInfo, Task, TaskRunState, TaskRunStatus, TaskState, TeleopReply,
+    TeleopVelocity, Vector3, VelocitySample, VoiceChatReply, VoiceChatRequest, VoicePlayback,
+    VoicePlaybackCancelRequest, VoicePlaybackQuery, VoiceProfileInfo, VoiceProfileList,
+    VoiceSpeakRequest, VoiceSwitchComponentRequest, VoiceSwitchProfileRequest, VoiceSystemStatus,
+    VoiceUpdatePromptRequest,
 };
 pub use system::System;
 pub use tasks::Tasks;
 pub use tonic::Code;
+pub use voice::{Voice, VoiceSpeakOptions};

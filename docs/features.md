@@ -53,8 +53,10 @@ V1 本地控制与观测直接使用 `BrainstemClient → 13145`，不依赖 `50
 | 身体、电机与运动状态 | `body_state`、`watch_body_state`、`control_status`、`status`、`watch_state[_at]` | Brainstem 只读源、Gateway 状态投影 | 本地已测；身体为源事件，运动缓存目标 1–100Hz，不代表传感器新样本 |
 | 速度与里程计 | `velocity`、`watch_velocity`、`odometry`、`watch_odometry` | SLAM/定位里程计缓存 | 本地映射、坐标与缺失已测；里程计 **10Hz**，速度高频流可重复约 10Hz 源样本 |
 | Builtin/External 接管 | `controller`、`external_control`（SDK/Brainstem 双层策略内核） | `Brainstem` `RobotExternalControl` (`v0.0.1`) + `RealJoint` 5 项 MIT `SafetyGate` | **服务端已实装并完成本地单测，待真机部署与实机验收**。`v0.0.1` 在 `:13145` 挂载 `RobotExternalControl`，共享唯一 `RealJoint`/`RealImu`/`ControlArbiter`，受内置互斥、`YUNZHUO` 物理抢占与 `Disable`/`Damp` 瞬时切断保护 |
-| Euler、站高、步态、速度档位 | 尚无公开整机 API | 需 Brainstem/driver 实际执行能力与范围 | **未实现**。Brainstem Set/GetSpeedMode 当前返回 UNIMPLEMENTED；未生成空壳成功接口 |
-| 阻尼软急停与摔倒恢复 | Brainstem/SDK 已接入 `damp()`（`v0.0.1`）；`RobotRecovery` 已关闭 | Brainstem `Damp`（100ms 斜坡泄力至 `Grounded`）；LingTu `doso.cpp` `BodyAction::Damp` 已联调通过；`Recovery` 未启用 | **阻尼就绪待实机动作验收；Recovery 已关闭**。`brainstem.env` 已显式禁用半成品 `THUNDER_RECOVERY_MODEL_CONFIG`，`:13145` 不挂载 `RobotRecovery` |
+| 动作库 | `list_gestures`、`play_gesture`（`robot.sport()` / `robot.motion()`） | Brainstem `ListGestures` / `PlayGesture`（`/opt/brainstem/data/gestures/{index,library}.json`） | 6 层（Proto/Rust/网桥/FFI/C++/Python）已接入并通过本地单测；随 `v0.0.2-unified` 上机开放 |
+| 机身高度调节 | `body_height_status`、`set_body_height`（`robot.sport()` / `robot.motion()`） | Brainstem `GetBodyHeightStatus` / `SetBodyHeight`（`height` / `single_frame_height_v2`，范围 `0.25–0.50 m`） | 6 层（Proto/Rust/网桥/FFI/C++/Python）已接入并通过本地单测与真机只读验收；动作调节待安全窗口验收 |
+| Euler、步态、速度档位 | 尚无公开整机 API | 需 Brainstem/driver 实际执行能力与范围 | **未实现**。Brainstem Set/GetSpeedMode 当前返回 UNIMPLEMENTED；未生成空壳成功接口 |
+| 阻尼软急停与摔倒恢复 | `damp()`、`recovery_status`、`recovery_{enter,enable,heartbeat,start,cancel,exit}` | Brainstem `Damp` + `RobotRecovery`（`policy_estimator_actor.onnx` + 20ms `clockTimer` tick） | 6 层（Proto/Rust/网桥/FFI/C++/Python）与 Brainstem 合并包 `v0.0.2-unified` 已完成本地验证；待机端上电后完成切换与实机验收 |
 
 ## localization
 

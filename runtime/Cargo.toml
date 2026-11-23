@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "hal",
+    "safety",
+    "policy",
+    "brain",
+    "brainstem",
+    "cli",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

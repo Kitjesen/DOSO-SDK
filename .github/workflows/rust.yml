@@ -22,6 +22,30 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install ONNX Runtime C-API (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ORT_VER="1.19.2"
+          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-linux-x64-${ORT_VER}.tgz" -o /tmp/ort.tgz
+          mkdir -p /tmp/ort
+          tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
+          test -f /tmp/ort/lib/libonnxruntime.so
+          echo "ONNXRUNTIME_DLL_PATH=/tmp/ort/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+
+      - name: Install ONNX Runtime C-API (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ortVer = "1.19.2"
+          $zipPath = Join-Path $env:RUNNER_TEMP "ort.zip"
+          $outDir = Join-Path $env:RUNNER_TEMP "ort"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$ortVer/onnxruntime-win-x64-$ortVer.zip" -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $outDir -Force
+          $dll = Join-Path $outDir "onnxruntime-win-x64-$ortVer\lib\onnxruntime.dll"
+          if (-not (Test-Path $dll)) { throw "Missing ONNX Runtime DLL at $dll" }
+          "ONNXRUNTIME_DLL_PATH=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -54,6 +78,11 @@ jobs:
 
       - name: Build C/Python FFI shared library
         run: cargo build --manifest-path ffi/Cargo.toml
+
+      - name: Test Rust Brainstem runtime (all crates + 4-model ONNX Golden + Hot-Deploy E2E)
+        run: |
+          cargo clippy --manifest-path runtime/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path runtime/Cargo.toml
 
       - name: Verify crate package
         run: cargo package -p doso-sdk --allow-dirty --locked

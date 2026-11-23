@@ -2,6 +2,7 @@ pub mod base_gateway;
 pub mod bridge;
 pub mod dds_bus;
 pub mod freshness;
+pub mod voice_proxy;
 
 pub use base_gateway::{
     serve_base_gateway, spawn_base_gateway_on_listener, BaseGatewayConfig, BaseGatewayService,
@@ -13,3 +14,4 @@ pub use dds_bus::{
     THUNDER_JOINT_NAMES16,
 };
 pub use freshness::{CmdVelFreshnessSample, CrossBoardFreshnessGate, FreshnessDecision};
+pub use voice_proxy::AskMeVoiceConfig;

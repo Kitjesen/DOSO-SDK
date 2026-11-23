@@ -1,0 +1,6 @@
+{
+  "contract": "mujica-v89-history60x6-raw16-features56",
+  "schema_version": 1,
+  "model": "policy_estimator_actor.onnx",
+  "sha256": "1089a94bfe90749b9f4360cab99ffd4ade18a87956e43cf03dbd22f1c0e73016"
+}

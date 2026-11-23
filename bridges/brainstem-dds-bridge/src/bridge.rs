@@ -1251,6 +1251,20 @@ mod tests {
             }))
         }
 
+        async fn set_body_height(
+            &self,
+            _: Request<rpc::BodyHeightCommand>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn get_body_height_status(
+            &self,
+            _: Request<()>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
         async fn play_gesture(
             &self,
             _: Request<rpc::GestureRequest>,

@@ -1155,6 +1155,69 @@ mod tests {
             Err(Status::unimplemented("unused"))
         }
 
+        async fn body_height_status(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn set_body_height(
+            &self,
+            _: Request<rpc::SetBodyHeightRequest>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_status(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> std::result::Result<Response<rpc::RecoveryStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_enter(
+            &self,
+            _: Request<rpc::RecoveryStartRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_enable(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_heartbeat(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_start(
+            &self,
+            _: Request<rpc::RecoveryStartRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryActionReply>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_cancel(
+            &self,
+            _: Request<rpc::RecoveryCancelRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryActionReply>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn recovery_exit(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> std::result::Result<Response<rpc::RecoveryStatus>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
         async fn play_gesture(
             &self,
             _: Request<rpc::PlayGestureRequest>,

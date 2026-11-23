@@ -1,0 +1,738 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use doso_brain::{BrainEngine, RecoveryPhase, RecoveryRuntime, SpeedMode};
+use doso_core::{
+    ControlOwner, FsmState, ImuState, JointFeedback, MitCmd16, ProprioFrame, RemotePadState,
+    WalkCommand,
+};
+use doso_hal::{BenchNullHal, HalBackend, HalDiagnostics};
+use doso_policy::LoadedPolicyPackage;
+use doso_safety::SafetyConfig;
+
+fn packages_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("models")
+        .join("packages")
+}
+
+fn load_baseline_packages(engine: &mut BrainEngine) {
+    let root = packages_root();
+    let flat = LoadedPolicyPackage::load_from_dir(root.join("flat_w5"))
+        .expect("flat_w5 package must load");
+    engine
+        .register_policy(flat, Some("flat"))
+        .expect("register flat_w5");
+    engine.switch_profile("flat").expect("switch to flat");
+
+    let rec = LoadedPolicyPackage::load_from_dir(root.join("recovery_v89"))
+        .expect("recovery_v89 package must load");
+    engine
+        .register_policy(rec, None)
+        .expect("register recovery_v89");
+}
+
+struct SharedMockState {
+    pad: RemotePadState,
+    imu_override: Option<ImuState>,
+    last_cmd: MitCmd16,
+    motors_enabled: bool,
+    disable_confirmed: bool,
+    set_zero_calls: usize,
+}
+
+impl Default for SharedMockState {
+    fn default() -> Self {
+        Self {
+            pad: RemotePadState::default(),
+            imu_override: None,
+            last_cmd: MitCmd16::default(),
+            motors_enabled: false,
+            disable_confirmed: true,
+            set_zero_calls: 0,
+        }
+    }
+}
+
+struct ControllableHal {
+    inner: BenchNullHal,
+    state: Arc<Mutex<SharedMockState>>,
+}
+
+impl ControllableHal {
+    fn new(tx_enabled: bool, state: Arc<Mutex<SharedMockState>>) -> Self {
+        Self {
+            inner: BenchNullHal::new(tx_enabled),
+            state,
+        }
+    }
+}
+
+impl HalBackend for ControllableHal {
+    fn name(&self) -> &'static str {
+        "controllable-mock"
+    }
+
+    fn sample_proprio(&mut self, now_us: u64) -> ProprioFrame {
+        let mut p = self.inner.sample_proprio(now_us);
+        if let Some(mut imu) = self.state.lock().unwrap().imu_override {
+            imu.timestamp_us = now_us;
+            imu.online = true;
+            p.imu = imu;
+        }
+        p
+    }
+
+    fn sample_remote(&mut self, _now_us: u64) -> RemotePadState {
+        self.state.lock().unwrap().pad
+    }
+
+    fn set_tx_enabled(&mut self, enabled: bool) {
+        self.inner.set_tx_enabled(enabled);
+    }
+
+    fn tx_enabled(&self) -> bool {
+        self.inner.tx_enabled()
+    }
+
+    fn enable_motors(&mut self) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.motors_enabled = true;
+        st.disable_confirmed = false;
+        drop(st);
+        self.inner.enable_motors()
+    }
+
+    fn disable_motors(&mut self, clear_errors: bool) -> Result<()> {
+        self.state.lock().unwrap().motors_enabled = false;
+        self.inner.disable_motors(clear_errors)
+    }
+
+    fn send_mit_verified(&mut self, cmd: &MitCmd16) -> Result<()> {
+        self.state.lock().unwrap().last_cmd = *cmd;
+        self.inner.send_mit_verified(cmd)
+    }
+
+    fn calibrate_set_zero(&mut self) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if !self.inner.tx_enabled() || st.motors_enabled || !st.disable_confirmed {
+            anyhow::bail!("mock calibrate_set_zero precondition failed");
+        }
+        st.set_zero_calls += 1;
+        Ok(())
+    }
+
+    fn motor_disable_confirmed(&self) -> bool {
+        self.state.lock().unwrap().disable_confirmed
+    }
+
+    fn diagnostics(&self) -> HalDiagnostics {
+        self.inner.diagnostics()
+    }
+}
+
+#[test]
+fn recovery_phase_discriminants_match_proto_contract() {
+    assert_eq!(RecoveryPhase::Unknown as i32, 0);
+    assert_eq!(RecoveryPhase::Disabled as i32, 1);
+    assert_eq!(RecoveryPhase::Preparing as i32, 2);
+    assert_eq!(RecoveryPhase::Waiting as i32, 3);
+    assert_eq!(RecoveryPhase::Recovering as i32, 4);
+    assert_eq!(RecoveryPhase::Balanced as i32, 5);
+    assert_eq!(RecoveryPhase::Lowering as i32, 6);
+    assert_eq!(RecoveryPhase::ProneHold as i32, 7);
+    assert_eq!(RecoveryPhase::StandUp as i32, 8);
+    assert_eq!(RecoveryPhase::Standing as i32, 9);
+    assert_eq!(RecoveryPhase::SitDown as i32, 10);
+    assert_eq!(RecoveryPhase::Grounded as i32, 11);
+    assert_eq!(RecoveryPhase::Failed as i32, 12);
+}
+
+#[test]
+fn recovery_op_id_validation_and_session_guards() {
+    let mut rec = RecoveryRuntime::new(Some("mujica_recovery_v89".into()), true);
+    assert!(rec.enter("", true, 1_000).is_err());
+    assert!(rec.enter(&"a".repeat(81), true, 1_000).is_err());
+    assert!(rec.enter("bad op!", true, 1_000).is_err());
+    assert!(rec.enter("bad/slash", true, 1_000).is_err());
+
+    let max_valid = "A_z-09".repeat(13) + "ab"; // 80 chars
+    assert_eq!(max_valid.len(), 80);
+    let tok = rec.enter(&max_valid, true, 1_000).expect("80-char valid op_id");
+    assert_eq!(rec.phase(), RecoveryPhase::Preparing);
+
+    // Idempotent re-enter with identical op_id before lease expiry returns same token
+    let tok_same = rec.enter(&max_valid, false, 50_000).unwrap();
+    assert_eq!(tok_same, tok);
+
+    // Conflicting op_id while selected must be rejected
+    assert!(rec.enter("other-op-2", true, 60_000).is_err());
+
+    rec.exit(&tok).unwrap();
+    assert_eq!(rec.phase(), RecoveryPhase::Disabled);
+    assert!(!rec.selected());
+}
+
+#[test]
+fn full_11_phase_recovery_progression_with_real_onnx() {
+    let mock_state = Arc::new(Mutex::new(SharedMockState::default()));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    let mut now_us = 10_000u64;
+    assert_eq!(engine.recovery_status().phase, RecoveryPhase::Disabled as i32);
+
+    // 1. Enter -> Preparing (2)
+    let tok = engine
+        .recovery
+        .enter("rec_full_pipeline_01", true, now_us)
+        .expect("enter recovery");
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Preparing);
+    assert!(!engine.recovery_status().motor_disable_confirmed);
+
+    // 2. Enable -> Waiting (3)
+    engine.enable_motors().unwrap();
+    let initial_pos = engine.latest_proprio().positions();
+    engine
+        .recovery
+        .enable(&tok, initial_pos, now_us)
+        .expect("enable recovery");
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Waiting);
+
+    // Step one 50Hz tick in Waiting: holds initial pose with recovery gains (kp=80 legs, 0 wheels)
+    engine.tick_200hz(now_us);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Recovery);
+    {
+        let last = mock_state.lock().unwrap().last_cmd;
+        assert!((last.0[0].kp - 80.0).abs() < 1e-9);
+        assert!((last.0[0].kd - 10.0).abs() < 1e-9);
+        assert_eq!(last.0[12].kp, 0.0);
+        assert_eq!(last.0[12].dq, 0.0);
+    }
+
+    // 3. Start -> Recovering (4)
+    {
+        let rec_name = engine.recovery.policy_name().unwrap().to_owned();
+        let pkg = engine.policies.get_mut(&rec_name).unwrap();
+        engine
+            .recovery
+            .start(&tok, "rec_full_pipeline_01", pkg, now_us)
+            .expect("start recovery");
+    }
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Recovering);
+
+    // Helper to advance exactly 1 policy tick (4 x 200Hz ticks = 20ms) while refreshing heartbeat
+    let step_50hz = |eng: &mut BrainEngine, t: &mut u64, tok: &str| {
+        eng.recovery.heartbeat(tok, *t).unwrap();
+        for _ in 0..4 {
+            *t += 5_000;
+            eng.tick_200hz(*t);
+        }
+    };
+
+    // Tilted robot (-grav.z = 0.5 < 0.94) stays in Recovering
+    mock_state.lock().unwrap().imu_override = Some(ImuState {
+        gyro_rad_s: [0.6, -0.2, 0.1],
+        accel_m_s2: [0.0, 0.0, 9.80665],
+        quat_wxyz: [0.866, 0.5, 0.0, 0.0],
+        projected_gravity: [0.866, 0.0, -0.5],
+        timestamp_us: now_us,
+        online: true,
+    });
+    for _ in 0..8 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        assert_eq!(engine.recovery.phase(), RecoveryPhase::Recovering);
+    }
+
+    // Upright gravity (-grav.z = 0.98 >= 0.94) but excessive gyro (0.3^2 = 0.09 > 0.04) must NOT count as stable
+    mock_state.lock().unwrap().imu_override = Some(ImuState {
+        gyro_rad_s: [0.3, 0.0, 0.0],
+        accel_m_s2: [0.0, 0.0, 9.80665],
+        quat_wxyz: [1.0, 0.0, 0.0, 0.0],
+        projected_gravity: [0.0, 0.0, -0.98],
+        timestamp_us: now_us,
+        online: true,
+    });
+    for _ in 0..5 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        assert_eq!(engine.recovery.phase(), RecoveryPhase::Recovering);
+    }
+
+    // 4. Upright & stable (-grav.z = 0.98 >= 0.94, gyro_norm_sq = 0.0075 <= 0.04) for 25 ticks -> Balanced (5)
+    mock_state.lock().unwrap().imu_override = Some(ImuState {
+        gyro_rad_s: [0.05, -0.05, 0.05],
+        accel_m_s2: [0.0, 0.0, 9.80665],
+        quat_wxyz: [1.0, 0.0, 0.0, 0.0],
+        projected_gravity: [0.0, 0.0, -0.98],
+        timestamp_us: now_us,
+        online: true,
+    });
+    for i in 1..=25 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 25 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Recovering);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Balanced);
+        }
+    }
+
+    // 5. Hold Balanced for 15 ticks -> Lowering (6)
+    for i in 1..=15 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 15 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Balanced);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Lowering);
+        }
+    }
+
+    // 6. Lowering for 50 ticks -> ProneHold (7) at sitting_pose ([0.0; 16])
+    for i in 1..=50 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 50 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Lowering);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::ProneHold);
+        }
+    }
+    {
+        let last = mock_state.lock().unwrap().last_cmd;
+        for j in 0..12 {
+            assert!(
+                last.0[j].q.abs() < 1e-9,
+                "end of Lowering must reach sitting_pose[0..12]=0, got {}",
+                last.0[j].q
+            );
+        }
+    }
+
+    // 7. ProneHold for 15 ticks -> StandUp (8)
+    for i in 1..=15 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 15 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::ProneHold);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::StandUp);
+        }
+    }
+
+    // 8. StandUp for 75 ticks -> Standing (9)
+    for i in 1..=75 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 75 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::StandUp);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Standing);
+        }
+    }
+
+    // 9. Standing holds nominal standing_pose with zero wheel velocity
+    step_50hz(&mut engine, &mut now_us, &tok);
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Standing);
+    {
+        let expected_stand = [-0.1, -0.8, 1.8, 0.1, 0.8, -1.8, 0.1, 0.8, -1.8, -0.1, -0.8, 1.8];
+        let last = mock_state.lock().unwrap().last_cmd;
+        for (i, &exp) in expected_stand.iter().enumerate() {
+            assert!(
+                (last.0[i].q - exp).abs() < 1e-9,
+                "Standing leg {i} target {} != {exp}",
+                last.0[i].q
+            );
+        }
+        for w in 12..16 {
+            assert_eq!(last.0[w].dq, 0.0, "Standing wheel {w} velocity must be 0.0");
+            assert_eq!(last.0[w].kp, 0.0, "Standing wheel {w} kp must be 0.0");
+        }
+    }
+
+    // 10 & 11. Optional SitDown (50 ticks) -> Grounded -> Exit -> Disabled
+    engine.recovery.sit_down(&tok, now_us).unwrap();
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::SitDown);
+    for i in 1..=50 {
+        step_50hz(&mut engine, &mut now_us, &tok);
+        if i < 50 {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::SitDown);
+        } else {
+            assert_eq!(engine.recovery.phase(), RecoveryPhase::Grounded);
+        }
+    }
+
+    engine.disable_motors(false).unwrap();
+    engine.recovery.exit(&tok).unwrap();
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Disabled);
+    assert!(engine.recovery_status().motor_disable_confirmed);
+}
+
+#[test]
+fn recovery_timeout_exceeding_500_ticks_fails_and_disables_motors() {
+    let mock_state = Arc::new(Mutex::new(SharedMockState {
+        imu_override: Some(ImuState {
+            gyro_rad_s: [0.5, 0.0, 0.0],
+            accel_m_s2: [9.80665, 0.0, 0.0],
+            quat_wxyz: [0.707, 0.0, 0.707, 0.0],
+            projected_gravity: [1.0, 0.0, 0.0], // fallen on side (-grav.z = 0.0 < 0.94)
+            timestamp_us: 0,
+            online: true,
+        }),
+        ..SharedMockState::default()
+    }));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    let mut now_us = 10_000u64;
+    let tok = engine.recovery.enter("op-timeout-test", true, now_us).unwrap();
+    engine.enable_motors().unwrap();
+    assert!(engine.safety.motor_output_enabled());
+
+    let pos = engine.latest_proprio().positions();
+    engine.recovery.enable(&tok, pos, now_us).unwrap();
+    {
+        let rec_name = engine.recovery.policy_name().unwrap().to_owned();
+        let pkg = engine.policies.get_mut(&rec_name).unwrap();
+        engine
+            .recovery
+            .start(&tok, "op-timeout-test", pkg, now_us)
+            .unwrap();
+    }
+
+    // Run 500 ticks in Recovering (still within 10s budget)
+    for _ in 0..500 {
+        engine.recovery.heartbeat(&tok, now_us).unwrap();
+        engine.tick_200hz(now_us);
+        for _ in 0..3 {
+            now_us += 5_000;
+            engine.tick_200hz(now_us);
+        }
+        now_us += 5_000;
+    }
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Recovering);
+
+    // 501st 50Hz tick exceeds 500 ticks -> Failed + motor_disable_confirmed = true + motors disabled
+    engine.recovery.heartbeat(&tok, now_us).unwrap();
+    engine.tick_200hz(now_us);
+    assert_eq!(engine.recovery.phase(), RecoveryPhase::Failed);
+    assert!(engine.recovery_status().motor_disable_confirmed);
+    assert!(!engine.safety.motor_output_enabled());
+    assert!(!mock_state.lock().unwrap().motors_enabled);
+}
+
+#[test]
+fn speed_mode_clamps_walk_velocity_and_reclamps_on_downgrade() {
+    let mut engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(true)),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+    assert_eq!(engine.speed_mode(), SpeedMode::Normal);
+
+    // Bring engine to Standing
+    engine.enable_motors().unwrap();
+    engine.stand_up().unwrap();
+    for step in 0..=155 {
+        engine.tick_sim(10_000 + step * 20_000);
+    }
+    assert_eq!(engine.status_snapshot(4_000_000).fsm_state, FsmState::Standing);
+
+    // Normal mode clamps vx, vy to [-1.0, 1.0] and yaw to [-1.5, 1.5]
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 2.2,
+            vy: -1.9,
+            yaw: 2.3,
+        })
+        .unwrap();
+    assert_eq!(engine.status_snapshot(4_000_000).fsm_state, FsmState::Walking);
+    assert_eq!(
+        engine.walk_command(),
+        WalkCommand {
+            vx: 1.0,
+            vy: -1.0,
+            yaw: 1.5,
+        }
+    );
+
+    // High mode allows up to [-2.5, 2.5] on vx, vy, yaw
+    engine.set_speed_mode(SpeedMode::High);
+    assert_eq!(engine.speed_mode(), SpeedMode::High);
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 2.2,
+            vy: -1.9,
+            yaw: -2.3,
+        })
+        .unwrap();
+    assert_eq!(
+        engine.walk_command(),
+        WalkCommand {
+            vx: 2.2,
+            vy: -1.9,
+            yaw: -2.3,
+        }
+    );
+
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 4.0,
+            vy: -3.2,
+            yaw: 3.8,
+        })
+        .unwrap();
+    assert_eq!(
+        engine.walk_command(),
+        WalkCommand {
+            vx: 2.5,
+            vy: -2.5,
+            yaw: 2.5,
+        }
+    );
+
+    // Switching back to Normal immediately clamps active velocity
+    engine.set_speed_mode(SpeedMode::Normal);
+    assert_eq!(
+        engine.walk_command(),
+        WalkCommand {
+            vx: 1.0,
+            vy: -1.0,
+            yaw: 1.5,
+        }
+    );
+}
+
+#[test]
+fn remote_pad_rising_edge_transitions_and_stick_mapping() {
+    let mock_state = Arc::new(Mutex::new(SharedMockState::default()));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+    engine.enable_motors().unwrap();
+
+    let mut now_us = 10_000u64;
+    let step_200hz = |eng: &mut BrainEngine, t: &mut u64, n: usize| {
+        for _ in 0..n {
+            *t += 5_000;
+            eng.tick_200hz(*t);
+        }
+    };
+
+    // Activate pad idle
+    mock_state.lock().unwrap().pad = RemotePadState {
+        active: true,
+        ..RemotePadState::default()
+    };
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(
+        engine.status_snapshot(now_us).source_owner,
+        ControlOwner::Yunzhuo
+    );
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Grounded);
+
+    // 1. Rising L1 when Grounded -> StandUp -> Standing (keep L1 held to verify edge detection)
+    mock_state.lock().unwrap().pad.l1 = true;
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(
+        engine.status_snapshot(now_us).fsm_state,
+        FsmState::Transitioning
+    );
+    step_200hz(&mut engine, &mut now_us, 155 * 4);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Standing);
+    mock_state.lock().unwrap().pad.l1 = false;
+
+    // 2. Remote sticks map (vx: pad.ly, vy: -pad.lx, yaw: -pad.rx) into Walking
+    mock_state.lock().unwrap().pad.ly = 0.75;
+    mock_state.lock().unwrap().pad.lx = 0.35;
+    mock_state.lock().unwrap().pad.rx = -0.5;
+    step_200hz(&mut engine, &mut now_us, 4);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Walking);
+    assert_eq!(
+        engine.walk_command(),
+        WalkCommand {
+            vx: 0.75,
+            vy: -0.35,
+            yaw: 0.5,
+        }
+    );
+
+    // Centering sticks transitions Walking -> Standing
+    mock_state.lock().unwrap().pad.ly = 0.0;
+    mock_state.lock().unwrap().pad.lx = 0.0;
+    mock_state.lock().unwrap().pad.rx = 0.0;
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Standing);
+
+    // 3. Rising L2 when Standing -> SitDown -> Grounded
+    mock_state.lock().unwrap().pad.l2 = true;
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(
+        engine.status_snapshot(now_us).fsm_state,
+        FsmState::Transitioning
+    );
+    step_200hz(&mut engine, &mut now_us, 155 * 4);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Grounded);
+    mock_state.lock().unwrap().pad.l2 = false;
+    step_200hz(&mut engine, &mut now_us, 1);
+
+    // 4. Stand up again, then rising R1 -> Damping even while Yunzhuo owns ControlArbiter!
+    mock_state.lock().unwrap().pad.l1 = true;
+    step_200hz(&mut engine, &mut now_us, 1);
+    mock_state.lock().unwrap().pad.l1 = false;
+    step_200hz(&mut engine, &mut now_us, 155 * 4);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Standing);
+
+    mock_state.lock().unwrap().pad.r1 = true;
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Damping);
+
+    // Held R1 does not re-reset Damping after it settles to Grounded
+    step_200hz(&mut engine, &mut now_us, 35 * 4);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Grounded);
+
+    // 5. Dedicated damp_btn also triggers Damping
+    mock_state.lock().unwrap().pad.r1 = false;
+    mock_state.lock().unwrap().pad.damp_btn = true;
+    step_200hz(&mut engine, &mut now_us, 1);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Damping);
+}
+
+#[test]
+fn sim_inject_tick_history_and_calibrate_set_zero() {
+    // BenchNullHal defaults to unsupported for calibrate_set_zero
+    let mut bench_engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(true)),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    assert!(
+        bench_engine
+            .calibrate_set_zero()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported")
+    );
+
+    let mock_state = Arc::new(Mutex::new(SharedMockState::default()));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    // SetZero rejected when hardware motor_disable_confirmed is false
+    mock_state.lock().unwrap().disable_confirmed = false;
+    assert!(engine.calibrate_set_zero().is_err());
+    assert_eq!(mock_state.lock().unwrap().set_zero_calls, 0);
+
+    // SetZero succeeds when Grounded, motors disabled, and motor_disable_confirmed is true
+    mock_state.lock().unwrap().disable_confirmed = true;
+    engine
+        .calibrate_set_zero()
+        .expect("calibrate_set_zero must succeed when Grounded, disabled, and confirmed");
+    assert_eq!(mock_state.lock().unwrap().set_zero_calls, 1);
+    assert!(engine.latest_history().is_none());
+    assert_eq!(engine.history_seq(), 0);
+
+    // SetZero rejected when motors enabled
+    engine.enable_motors().unwrap();
+    assert!(engine.calibrate_set_zero().is_err());
+    assert_eq!(mock_state.lock().unwrap().set_zero_calls, 1);
+
+    // Inject deterministic simulation proprioception
+    let stand_pose = [
+        -0.12, -0.93, 1.96, 0.12, 0.93, -1.96, 0.12, 0.93, -1.96, -0.12, -0.93, 1.96, 0.0, 0.0,
+        0.0, 0.0,
+    ];
+    let sim_proprio = ProprioFrame {
+        sequence: 42,
+        monotonic_us: 100_000,
+        imu: ImuState {
+            gyro_rad_s: [0.01, -0.02, 0.03],
+            accel_m_s2: [0.0, 0.0, 9.80665],
+            quat_wxyz: [1.0, 0.0, 0.0, 0.0],
+            projected_gravity: [0.0, 0.0, -1.0],
+            timestamp_us: 100_000,
+            online: false, // inject_sim_state marks online=true automatically
+        },
+        joints: std::array::from_fn(|i| JointFeedback {
+            q: stand_pose[i],
+            dq: 0.05 * (i as f64),
+            ..JointFeedback::default()
+        }),
+    };
+    engine.inject_sim_state(sim_proprio);
+
+    // Stand up and step deterministically via tick_sim
+    engine.stand_up().unwrap();
+    let mut now_us = 100_000u64;
+    for _ in 0..=150 {
+        now_us += 20_000;
+        let h = engine.tick_sim(now_us);
+        assert_eq!(h.monotonic_us, now_us);
+        assert_eq!(h.gyro_rad_s, [0.01, -0.02, 0.03]);
+        assert!(h.observation.is_empty(), "observation is empty outside Walking");
+    }
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Standing);
+    assert_eq!(engine.history_seq(), 151);
+
+    // SetZero also rejected when Standing even if motors were disabled? (disable_motors resets Grounded, so test before disable)
+    assert!(engine.calibrate_set_zero().is_err());
+
+    // Command Walk and step tick_sim: observation vector (53D for flat_w5) must be populated!
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 0.6,
+            vy: -0.1,
+            yaw: 0.2,
+        })
+        .unwrap();
+    now_us += 20_000;
+    let h_walk1 = engine.tick_sim(now_us);
+    assert_eq!(engine.history_seq(), 152);
+    assert_eq!(h_walk1.walk_cmd.vx, 0.6);
+    assert_eq!(h_walk1.joint_pos.0, stand_pose);
+    assert_eq!(
+        h_walk1.observation.len(),
+        53,
+        "flat_w5 packed_input(0) must be 53 dims"
+    );
+    assert!((h_walk1.kp.0[0] - 73.0).abs() < 1e-9);
+    assert!((h_walk1.kd.0[0] - 6.93).abs() < 1e-9);
+
+    now_us += 20_000;
+    let h_walk2 = engine.tick_sim(now_us);
+    assert_eq!(engine.history_seq(), 153);
+    // `action` on step 2 must equal `next_action` from step 1
+    assert_eq!(h_walk2.action, h_walk1.next_action);
+    assert_eq!(
+        engine.latest_history().unwrap().monotonic_us,
+        h_walk2.monotonic_us
+    );
+}

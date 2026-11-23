@@ -150,3 +150,51 @@ message ClearMotorFaultRequest {
   Command command = 1;
   repeated uint32 joint_ids = 2;
 }
+
+message BodyHeightStatus {
+  bool supported = 1;
+  double current_height_m = 2;
+  double target_height_m = 3;
+  double min_height_m = 4;
+  double max_height_m = 5;
+  double rate_mps = 6;
+}
+
+message SetBodyHeightRequest {
+  Command command = 1;
+  double height_m = 2;
+}
+
+message RecoveryStatus {
+  int32 availability = 1;           // 0=unknown, 1=unavailable, 2=available
+  int32 phase = 2;                  // 0=unknown..12=failed
+  string operation_id = 3;
+  string unavailable_reason = 4;
+  bool selected = 5;
+  string session_token = 6;
+  bool motor_disable_confirmed = 7;
+}
+
+message RecoverySessionRequest {
+  Command command = 1;
+  string session_token = 2;
+}
+
+message RecoveryStartRequest {
+  Command command = 1;
+  string operation_id = 2;
+  string session_token = 3;
+}
+
+message RecoveryCancelRequest {
+  Command command = 1;
+  string operation_id = 2;
+  string session_token = 3;
+}
+
+message RecoveryActionReply {
+  string operation_id = 1;
+  int32 decision = 2;               // 0=unknown, 1=accepted, 2=rejected
+  int32 phase = 3;
+  string reason = 4;
+}

@@ -1,0 +1,17 @@
+schema_version: 2
+name: mujica_recovery_v89
+kind: recovery
+robot: thunder_v4
+joint_order: thunder_leg_major
+model:
+  file: "../../recovery/policy_estimator_actor.onnx"
+  sha256: "1089a94bfe90749b9f4360cab99ffd4ade18a87956e43cf03dbd22f1c0e73016"
+kinematics:
+  standing_pose: [-0.1, -0.8, 1.8, 0.1, 0.8, -1.8, 0.1, 0.8, -1.8, -0.1, -0.8, 1.8, 0.0, 0.0, 0.0, 0.0]
+inputs:
+  - { tensor: history, history: 6, clip: [-100.0, 100.0], obs: [ang_vel, gravity, "zeros(3)", dof_pos_12, "zeros(4)", dof_vel_16, last_action, "const(2.0)", "phase_clock(1.2)"] }
+outputs: { action_tensor: raw_action, aux_tensors: ["features"] }
+action_decode: { scale_per_group: [0.125, 0.25, 0.25, 0.0], max_abs_raw_guard: 4.0, force_zero_wheel_on_stop: true }
+gains:
+  kp: { hip: 80.0, thigh: 80.0, calf: 80.0 }
+  kd: { hip: 10.0, thigh: 10.0, calf: 10.0, wheel: 1.0 }

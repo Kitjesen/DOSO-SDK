@@ -687,6 +687,112 @@ impl rpc::motion_server::Motion for Service {
         response.get_mut().stage = "damping_requested".into();
         Ok(response)
     }
+    async fn body_height_status(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::BodyHeightStatus>, Status> {
+        Ok(Response::new(rpc::BodyHeightStatus {
+            supported: true,
+            current_height_m: 0.375,
+            target_height_m: 0.375,
+            min_height_m: 0.25,
+            max_height_m: 0.50,
+            rate_mps: 0.05,
+        }))
+    }
+    async fn set_body_height(
+        &self,
+        request: Request<rpc::SetBodyHeightRequest>,
+    ) -> Result<Response<rpc::BodyHeightStatus>, Status> {
+        let h = request.into_inner().height_m;
+        Ok(Response::new(rpc::BodyHeightStatus {
+            supported: true,
+            current_height_m: h,
+            target_height_m: h,
+            min_height_m: 0.25,
+            max_height_m: 0.50,
+            rate_mps: 0.05,
+        }))
+    }
+    async fn recovery_status(
+        &self,
+        _: Request<rpc::Empty>,
+    ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+        Ok(Response::new(rpc::RecoveryStatus {
+            availability: 2,
+            phase: 1,
+            ..Default::default()
+        }))
+    }
+    async fn recovery_enter(
+        &self,
+        req: Request<rpc::RecoveryStartRequest>,
+    ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+        Ok(Response::new(rpc::RecoveryStatus {
+            availability: 2,
+            phase: 2,
+            operation_id: req.into_inner().operation_id,
+            selected: true,
+            session_token: "rec-tok-1".into(),
+            ..Default::default()
+        }))
+    }
+    async fn recovery_enable(
+        &self,
+        _: Request<rpc::RecoverySessionRequest>,
+    ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+        Ok(Response::new(rpc::RecoveryStatus {
+            availability: 2,
+            phase: 3,
+            selected: true,
+            ..Default::default()
+        }))
+    }
+    async fn recovery_heartbeat(
+        &self,
+        _: Request<rpc::RecoverySessionRequest>,
+    ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+        Ok(Response::new(rpc::RecoveryStatus {
+            availability: 2,
+            phase: 3,
+            selected: true,
+            ..Default::default()
+        }))
+    }
+    async fn recovery_start(
+        &self,
+        req: Request<rpc::RecoveryStartRequest>,
+    ) -> Result<Response<rpc::RecoveryActionReply>, Status> {
+        Ok(Response::new(rpc::RecoveryActionReply {
+            operation_id: req.into_inner().operation_id,
+            decision: 1,
+            phase: 4,
+            reason: String::new(),
+        }))
+    }
+    async fn recovery_cancel(
+        &self,
+        req: Request<rpc::RecoveryCancelRequest>,
+    ) -> Result<Response<rpc::RecoveryActionReply>, Status> {
+        Ok(Response::new(rpc::RecoveryActionReply {
+            operation_id: req.into_inner().operation_id,
+            decision: 1,
+            phase: 1,
+            reason: "Motor disable confirmed".into(),
+        }))
+    }
+    async fn recovery_exit(
+        &self,
+        _: Request<rpc::RecoverySessionRequest>,
+    ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+        Ok(Response::new(rpc::RecoveryStatus {
+            availability: 2,
+            phase: 1,
+            selected: false,
+            motor_disable_confirmed: true,
+            ..Default::default()
+        }))
+    }
     async fn clear_motor_fault(
         &self,
         request: Request<rpc::ClearMotorFaultRequest>,

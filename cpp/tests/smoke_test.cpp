@@ -32,6 +32,22 @@ int main() {
   assert(caps.low_level);
   assert(caps.observations);
   assert(caps.board_b_autonomy);
+  assert(caps.voice);
+
+  const std::string voice_status = robot.voice().status_json();
+  assert(voice_status.find("\"service\":\"askme\"") != std::string::npos);
+  const std::string voice_profiles = robot.voice().profiles_json();
+  assert(voice_profiles.find("\"active_profile\":\"patrol_default\"") != std::string::npos);
+  robot.voice().switch_profile("patrol_default");
+  const std::string pb_id = robot.voice().speak("系统自检通过");
+  assert(pb_id == "pb-mock-1");
+  const std::string pb_state = robot.voice().playback_status_json(pb_id);
+  assert(pb_state.find("\"state\":\"completed\"") != std::string::npos);
+  robot.voice().cancel_playback(pb_id, "test");
+  robot.voice().switch_component("llm", "deepseek", "deepseek-v4-flash", false);
+  robot.voice().update_prompt("你是小算机器狗。");
+  const std::string chat_resp = robot.voice().chat_json("你好");
+  assert(chat_resp.find("收到: 你好") != std::string::npos);
 
   const auto ctrl_status = robot.sport().control_status();
   assert(ctrl_status.body_kind == 1);  // Grounded
@@ -71,6 +87,18 @@ int main() {
   robot.sport().damp();
   robot.sport().play_gesture("bow");
   robot.sport().clear_motor_fault();
+
+  const auto bh0 = robot.sport().body_height_status();
+  assert(bh0.supported);
+  assert(std::abs(bh0.current_height_m - 0.375) < 1e-6);
+  const auto bh1 = robot.sport().set_body_height(0.42);
+  assert(bh1.supported && std::abs(bh1.target_height_m - 0.42) < 1e-6);
+  const std::string rec_st = robot.sport().recovery_status_json();
+  assert(rec_st.find("\"availability\":2") != std::string::npos);
+  const std::string rec_enter = robot.sport().recovery_enter_json("rec-op-1");
+  assert(rec_enter.find("\"session_token\":\"rec-mock-tok\"") != std::string::npos);
+  robot.sport().recovery_heartbeat_json("rec-mock-tok");
+  robot.sport().recovery_exit_json("rec-mock-tok");
 
   {
     auto teleop = robot.sport().take_control();

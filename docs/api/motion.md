@@ -11,6 +11,8 @@
 | 功能 | 方法 | Rust实现 |
 | --- | --- | --- |
 | 站起与坐下 | [stand_up](#stand_up)、[sit_down](#sit_down) | [posture.rs](../../src/motion/posture.rs) |
+| 机身高度调节 | `body_height_status`、`set_body_height` | [height.rs](../../src/motion/height.rs) |
+| 摔倒恢复 | `recovery_status`、`recovery_enter`、`recovery_enable`、`recovery_heartbeat`、`recovery_start`、`recovery_cancel`、`recovery_exit` | [recovery.rs](../../src/motion/recovery.rs) |
 | 电机与策略 | [enable_motors](#enable_motors)、[disable_motors](#disable_motors)、[profile](#profile)、[switch_profile](#switch_profile) | [motors.rs](../../src/motion/motors.rs)、[profile.rs](../../src/motion/profile.rs) |
 | 自定义控制器 | [controller](#controller)、[external_control](#external_control)、[外部会话方法](#外部会话方法) | [external.rs](../../src/motion/external.rs) |
 | 停止、复位与恢复 | [stop](#stop)、[emergency_stop](#emergency_stop)、[clear_emergency_stop](#clear_emergency_stop)、[resume](#resume) | [stop.rs](../../src/motion/stop.rs)、[resume.rs](../../src/motion/resume.rs) |
@@ -192,6 +194,37 @@ async fn switch_prepared_profile(
 ```
 
 示例运行前需已满足Grounded、电机关闭和控制权释放条件。以上接口的本地合同验证与设备现场验收分别记录。源码见[策略操作](../../src/motion/profile.rs)，Gateway复用共享body事务。
+
+## 机身高度调节
+
+### body_height_status / set_body_height
+
+```text
+pub async fn body_height_status(&self) -> Result<BodyHeightStatus>
+pub async fn set_body_height(&self, height_m: f64, request_id: Option<&str>) -> Result<BodyHeightStatus>
+```
+
+只读查询或设置机身目标高度（米）。调用 `set_body_height` 前需已切换至支持站高控制的策略（如 `height` / `single_frame_height_v2`），目标值须为有限数值且在 `[min_height_m, max_height_m]` 范围内（默认 `0.25–0.50 m`，限速 `0.05 m/s`）。源码见[高度调节](../../src/motion/height.rs)。
+
+## 摔倒恢复
+
+### recovery_status / recovery_enter / recovery_enable / recovery_heartbeat / recovery_start / recovery_cancel / recovery_exit
+
+```text
+pub async fn recovery_status(&self) -> Result<RecoveryStatus>
+pub async fn recovery_enter(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+pub async fn recovery_enable(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+pub async fn recovery_heartbeat(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+pub async fn recovery_start(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+pub async fn recovery_cancel(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+pub async fn recovery_exit(&self, session_id: &str, request_id: Option<&str>) -> Result<RecoveryActionReply>
+```
+
+通过统一 `Motion` 服务透传至 Brainstem `RobotRecovery` 生命周期状态机：
+
+1. `recovery_status()` 只读查询可用性（`availability == 2` 表示 `AVAILABLE`）、当前阶段、进度与模型 ID；
+2. 需以同一 `session_id` 按顺序执行 `recovery_enter` → `recovery_enable` → `recovery_start`，并在执行期间周期发送 `recovery_heartbeat`；
+3. 可随时调用 `recovery_cancel` 中止并切入保护，结束后调用 `recovery_exit` 释放恢复会话。源码见[摔倒恢复](../../src/motion/recovery.rs)。
 
 ## 停止与急停复位
 

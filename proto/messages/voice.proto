@@ -1,0 +1,97 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+
+message VoiceProfileInfo {
+  string profile_id = 1;
+  string label = 2;
+  string voice_id = 3;
+  string category = 4;
+  double speed = 5;
+  double volume = 6;
+  double pitch = 7;
+  string emotion = 8;
+}
+
+message VoiceProfileList {
+  string active_profile = 1;
+  repeated VoiceProfileInfo profiles = 2;
+  bool sound_cues_enabled = 3;
+  repeated string available_sound_cues = 4;
+  string raw_json = 5;
+}
+
+message VoiceSystemStatus {
+  string status = 1;
+  string service = 2;
+  string active_profile = 3;
+  string llm_provider = 4;
+  string llm_model = 5;
+  string asr_provider = 6;
+  string tts_provider = 7;
+  string raw_json = 8;
+}
+
+message VoiceSwitchProfileRequest {
+  Command command = 1;
+  string profile_id = 2;
+}
+
+message VoiceSpeakRequest {
+  Command command = 1;
+  string text = 2;
+  string priority = 3;
+  string queue_policy = 4;
+  string voice_profile_id = 5;
+  optional double speed = 6;
+  optional double pitch = 7;
+  optional double volume = 8;
+}
+
+message VoicePlaybackQuery {
+  string playback_id = 1;
+}
+
+message VoicePlaybackCancelRequest {
+  Command command = 1;
+  string playback_id = 2;
+  string reason = 3;
+}
+
+message VoicePlayback {
+  string playback_id = 1;
+  string state = 2;
+  string priority = 3;
+  uint32 text_chars = 4;
+  string message = 5;
+  string raw_json = 6;
+}
+
+message VoiceSwitchComponentRequest {
+  Command command = 1;
+  string component = 2;
+  string provider = 3;
+  string model = 4;
+  bool validate = 5;
+}
+
+message VoiceUpdatePromptRequest {
+  Command command = 1;
+  string system_prompt = 2;
+}
+
+message VoiceChatRequest {
+  Command command = 1;
+  string text = 2;
+  string thread_id = 3;
+  bool speak_reply = 4;
+}
+
+message VoiceChatReply {
+  string reply_text = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  double latency_ms = 4;
+  string raw_json = 5;
+}
