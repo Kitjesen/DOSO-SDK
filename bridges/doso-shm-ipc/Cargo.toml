@@ -13,3 +13,9 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

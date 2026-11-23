@@ -196,6 +196,8 @@ mod sys {
     const PROT_READ: i32 = 1;
     const PROT_WRITE: i32 = 2;
     const MAP_SHARED: i32 = 1;
+    #[cfg(target_os = "linux")]
+    const MAP_POPULATE: i32 = 0x08000;
     const MAP_FAILED: *mut c_void = !0usize as *mut c_void;
 
     extern "C" {
@@ -211,6 +213,7 @@ mod sys {
             offset: i64,
         ) -> *mut c_void;
         fn munmap(addr: *mut c_void, length: usize) -> i32;
+        fn mlock(addr: *const c_void, len: usize) -> i32;
         fn close(fd: i32) -> i32;
     }
 
@@ -256,13 +259,22 @@ mod sys {
         } else {
             PROT_READ
         };
-        let raw_ptr = unsafe { mmap(ptr::null_mut(), len, prot, MAP_SHARED, fd, 0) };
+        #[cfg(target_os = "linux")]
+        let map_flags = MAP_SHARED | MAP_POPULATE;
+        #[cfg(not(target_os = "linux"))]
+        let map_flags = MAP_SHARED;
+        let raw_ptr = unsafe { mmap(ptr::null_mut(), len, prot, map_flags, fd, 0) };
         if raw_ptr == MAP_FAILED || raw_ptr.is_null() {
             let err = std::io::Error::last_os_error();
             unsafe {
                 close(fd);
             }
             bail!("mmap({name}, {len}) failed: {err}");
+        }
+        // Best-effort pin SHM ring pages in RAM to prevent minor/major page faults on RT loops.
+        // Gracefully ignored if RLIMIT_MEMLOCK is restricted in unprivileged test environments.
+        unsafe {
+            let _ = mlock(raw_ptr as *const c_void, len);
         }
         Ok(ShmMapping {
             ptr: NonNull::new(raw_ptr as *mut u8).expect("non-null mmap"),

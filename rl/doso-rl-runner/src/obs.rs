@@ -55,6 +55,40 @@ impl ObservationBuilder {
         dq_hw: &[f64; NUM_JOINTS],
         last_action_policy: &[f32; NUM_JOINTS],
     ) -> Result<Vec<f32>> {
+        let mut out = vec![0.0_f32; self.config.obs_dim()];
+        self.push_and_build_into(
+            ang_vel_body,
+            proj_gravity,
+            cmd_vel,
+            q_hw,
+            dq_hw,
+            last_action_policy,
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    /// Zero-allocation variant of `push_and_build` that writes the stacked observation
+    /// directly into a caller-owned buffer of exact length `config.obs_dim()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_and_build_into(
+        &mut self,
+        ang_vel_body: [f64; 3],
+        proj_gravity: [f64; 3],
+        cmd_vel: [f64; 3],
+        q_hw: &[f64; NUM_JOINTS],
+        dq_hw: &[f64; NUM_JOINTS],
+        last_action_policy: &[f32; NUM_JOINTS],
+        out: &mut [f32],
+    ) -> Result<()> {
+        let expected_dim = self.config.obs_dim();
+        if out.len() != expected_dim {
+            bail!(
+                "observation output buffer length {} != expected {}",
+                out.len(),
+                expected_dim
+            );
+        }
         if !ang_vel_body.iter().all(|v| v.is_finite())
             || !proj_gravity.iter().all(|v| v.is_finite())
             || !cmd_vel.iter().all(|v| v.is_finite())
@@ -103,11 +137,12 @@ impl ObservationBuilder {
             self.history.push_back(frame);
         }
 
-        let mut out = Vec::with_capacity(self.config.obs_dim());
+        let mut offset = 0;
         for slot in &self.history {
-            out.extend_from_slice(slot);
+            out[offset..offset + SINGLE_OBS_DIM].copy_from_slice(slot);
+            offset += SINGLE_OBS_DIM;
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -116,6 +151,25 @@ pub fn policy_actions_to_joint_commands(
     raw_policy_action: &[f32],
     config: &DeployConfig,
 ) -> Result<([f32; NUM_JOINTS], Vec<JointCommand>)> {
+    let mut clipped_policy = [0.0_f32; NUM_JOINTS];
+    let mut hw_cmds = [JointCommand::damping(0.0); NUM_JOINTS];
+    policy_actions_to_joint_commands_into(
+        raw_policy_action,
+        config,
+        &mut clipped_policy,
+        &mut hw_cmds,
+    )?;
+    Ok((clipped_policy, hw_cmds.to_vec()))
+}
+
+/// Zero-allocation variant of `policy_actions_to_joint_commands` writing directly into
+/// caller-owned fixed-size arrays.
+pub fn policy_actions_to_joint_commands_into(
+    raw_policy_action: &[f32],
+    config: &DeployConfig,
+    clipped_policy: &mut [f32; NUM_JOINTS],
+    hw_cmds: &mut [JointCommand; NUM_JOINTS],
+) -> Result<()> {
     if raw_policy_action.len() != NUM_JOINTS {
         bail!(
             "expected {} policy actions, got {}",
@@ -127,8 +181,6 @@ pub fn policy_actions_to_joint_commands(
         bail!("policy produced non-finite action");
     }
 
-    let mut clipped_policy = [0.0_f32; NUM_JOINTS];
-    let mut hw_cmds = vec![JointCommand::damping(0.0); NUM_JOINTS];
     let clip = config.action_clip;
 
     for (p_idx, &raw) in raw_policy_action.iter().enumerate() {
@@ -149,7 +201,7 @@ pub fn policy_actions_to_joint_commands(
         };
     }
 
-    Ok((clipped_policy, hw_cmds))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -213,5 +265,27 @@ mod tests {
         assert!((cmds[12].dq - 5.0).abs() < 1e-6);
         assert_eq!(cmds[0].kp, 35.0);
         assert!((cmds[0].q - 0.25).abs() < 1e-6);
+
+        // Verify zero-allocation `_into` paths produce bit-identical results.
+        let mut builder_into = ObservationBuilder::new(cfg.clone());
+        let mut obs_buf = vec![0.0_f32; cfg.obs_dim()];
+        builder_into
+            .push_and_build_into(
+                [0.4, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+                [0.5, 0.0, 0.0],
+                &q,
+                &dq,
+                &last,
+                &mut obs_buf,
+            )
+            .unwrap();
+        assert_eq!(obs_buf, obs);
+
+        let mut clipped_into = [0.0_f32; NUM_JOINTS];
+        let mut cmds_into = [JointCommand::damping(0.0); NUM_JOINTS];
+        policy_actions_to_joint_commands_into(&action, &cfg, &mut clipped_into, &mut cmds_into)
+            .unwrap();
+        assert_eq!(cmds_into.as_slice(), cmds.as_slice());
     }
 }

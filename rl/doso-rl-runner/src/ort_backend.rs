@@ -11,6 +11,27 @@ pub trait PolicyBackend: Send + Sync {
     fn input_dim(&self) -> usize;
     fn output_dim(&self) -> usize;
     fn infer(&mut self, obs: &[f32]) -> Result<Vec<f32>>;
+
+    /// Zero-allocation inference writing outputs directly into `out` (length `output_dim()`).
+    fn infer_into(&mut self, obs: &[f32], out: &mut [f32]) -> Result<()> {
+        if out.len() != self.output_dim() {
+            bail!(
+                "policy output buffer length {} != expected {}",
+                out.len(),
+                self.output_dim()
+            );
+        }
+        let result = self.infer(obs)?;
+        if result.len() != out.len() {
+            bail!(
+                "policy returned {} floats, expected {}",
+                result.len(),
+                out.len()
+            );
+        }
+        out.copy_from_slice(&result);
+        Ok(())
+    }
 }
 
 /// Deterministic analytical policy for unit and integration tests without an external ONNX runtime.
@@ -40,6 +61,12 @@ impl PolicyBackend for GainScheduleTestBackend {
     }
 
     fn infer(&mut self, obs: &[f32]) -> Result<Vec<f32>> {
+        let mut out = vec![0.0_f32; self.output_dim];
+        self.infer_into(obs, &mut out)?;
+        Ok(out)
+    }
+
+    fn infer_into(&mut self, obs: &[f32], out: &mut [f32]) -> Result<()> {
         if obs.len() != self.input_dim {
             bail!(
                 "GainScheduleTestBackend expected {} floats, got {}",
@@ -47,13 +74,20 @@ impl PolicyBackend for GainScheduleTestBackend {
                 obs.len()
             );
         }
+        if out.len() != self.output_dim {
+            bail!(
+                "GainScheduleTestBackend expected output buffer {}, got {}",
+                self.output_dim,
+                out.len()
+            );
+        }
+        out.fill(0.0);
         let base = obs.len().saturating_sub(57);
         let cmd_vx = obs[base + 6];
-        let mut out = vec![0.0_f32; self.output_dim];
         for item in &mut out[12..16] {
             *item = cmd_vx * self.wheel_vel_scale;
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -61,6 +95,8 @@ const ORT_LOGGING_LEVEL_WARNING: u32 = 2;
 const ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: u32 = 1;
 const ORT_ARENA_ALLOCATOR: i32 = 0;
 const ORT_MEM_TYPE_DEFAULT: i32 = 0;
+const ORT_SEQUENTIAL: u32 = 0;
+const ORT_ENABLE_ALL: u32 = 99;
 
 #[repr(C)]
 struct OrtApiBase {
@@ -115,7 +151,12 @@ const SLOT_CREATE_ENV: usize = 3;
 const SLOT_CREATE_SESSION_FROM_ARRAY: usize = 8;
 const SLOT_RUN: usize = 9;
 const SLOT_CREATE_SESSION_OPTIONS: usize = 10;
+const SLOT_SET_SESSION_EXECUTION_MODE: usize = 13;
+const SLOT_ENABLE_MEM_PATTERN: usize = 16;
+const SLOT_ENABLE_CPU_MEM_ARENA: usize = 18;
+const SLOT_SET_SESSION_GRAPH_OPTIMIZATION_LEVEL: usize = 23;
 const SLOT_SET_INTRA_OP_NUM_THREADS: usize = 24;
+const SLOT_SET_INTER_OP_NUM_THREADS: usize = 25;
 const SLOT_SESSION_GET_INPUT_COUNT: usize = 30;
 const SLOT_SESSION_GET_OUTPUT_COUNT: usize = 31;
 const SLOT_SESSION_GET_INPUT_TYPE_INFO: usize = 33;
@@ -179,8 +220,15 @@ pub struct OrtDynamicBackend {
     input_name: CString,
     output_name: CString,
     input_shape: Vec<i64>,
+    output_shape: Vec<i64>,
     input_dim: usize,
     output_dim: usize,
+    // Pre-allocated, fixed-address backing buffers bound once to OrtValue tensors
+    // so 200Hz-1kHz inference runs with zero heap allocations and zero OrtValue churn.
+    input_buf: Box<[f32]>,
+    output_buf: Box<[f32]>,
+    input_val: *mut OrtValue,
+    output_val: *mut OrtValue,
 }
 
 unsafe impl Send for OrtDynamicBackend {}
@@ -189,6 +237,16 @@ unsafe impl Sync for OrtDynamicBackend {}
 impl Drop for OrtDynamicBackend {
     fn drop(&mut self) {
         unsafe {
+            let release_val: unsafe extern "system" fn(*mut OrtValue) =
+                self.api.slot(SLOT_RELEASE_VALUE);
+            if !self.input_val.is_null() {
+                release_val(self.input_val);
+                self.input_val = ptr::null_mut();
+            }
+            if !self.output_val.is_null() {
+                release_val(self.output_val);
+                self.output_val = ptr::null_mut();
+            }
             if !self.memory_info.is_null() {
                 let release: unsafe extern "system" fn(*mut OrtMemoryInfo) =
                     self.api.slot(SLOT_RELEASE_MEMORY_INFO);
@@ -303,11 +361,40 @@ impl OrtDynamicBackend {
                 return Err(err);
             }
 
-            let set_threads: unsafe extern "system" fn(
+            // Deterministic real-time single-thread execution with full graph fusion & arena reuse.
+            let set_exec_mode: unsafe extern "system" fn(
+                *mut OrtSessionOptions,
+                u32,
+            ) -> *mut OrtStatus = api.slot(SLOT_SET_SESSION_EXECUTION_MODE);
+            let _ = api.check(set_exec_mode(opts, ORT_SEQUENTIAL));
+
+            let enable_mem_pattern: unsafe extern "system" fn(
+                *mut OrtSessionOptions,
+            ) -> *mut OrtStatus = api.slot(SLOT_ENABLE_MEM_PATTERN);
+            let _ = api.check(enable_mem_pattern(opts));
+
+            let enable_arena: unsafe extern "system" fn(
+                *mut OrtSessionOptions,
+            ) -> *mut OrtStatus = api.slot(SLOT_ENABLE_CPU_MEM_ARENA);
+            let _ = api.check(enable_arena(opts));
+
+            let set_opt_level: unsafe extern "system" fn(
+                *mut OrtSessionOptions,
+                u32,
+            ) -> *mut OrtStatus = api.slot(SLOT_SET_SESSION_GRAPH_OPTIMIZATION_LEVEL);
+            let _ = api.check(set_opt_level(opts, ORT_ENABLE_ALL));
+
+            let set_intra: unsafe extern "system" fn(
                 *mut OrtSessionOptions,
                 i32,
             ) -> *mut OrtStatus = api.slot(SLOT_SET_INTRA_OP_NUM_THREADS);
-            let _ = api.check(set_threads(opts, 1));
+            let _ = api.check(set_intra(opts, 1));
+
+            let set_inter: unsafe extern "system" fn(
+                *mut OrtSessionOptions,
+                i32,
+            ) -> *mut OrtStatus = api.slot(SLOT_SET_INTER_OP_NUM_THREADS);
+            let _ = api.check(set_inter(opts, 1));
 
             let mut session: *mut OrtSession = ptr::null_mut();
             let create_sess: unsafe extern "system" fn(
@@ -354,12 +441,54 @@ impl OrtDynamicBackend {
                 input_name: CString::new("obs")?,
                 output_name: CString::new("actions")?,
                 input_shape: Vec::new(),
+                output_shape: Vec::new(),
                 input_dim: 0,
                 output_dim: 0,
+                input_buf: Box::new([]),
+                output_buf: Box::new([]),
+                input_val: ptr::null_mut(),
+                output_val: ptr::null_mut(),
             };
             backend.inspect_io()?;
+            backend.init_prebound_tensors()?;
             Ok(backend)
         }
+    }
+
+    unsafe fn init_prebound_tensors(&mut self) -> Result<()> {
+        self.input_buf = vec![0.0_f32; self.input_dim].into_boxed_slice();
+        self.output_buf = vec![0.0_f32; self.output_dim].into_boxed_slice();
+
+        let create_tensor: unsafe extern "system" fn(
+            *const OrtMemoryInfo,
+            *mut c_void,
+            usize,
+            *const i64,
+            usize,
+            u32,
+            *mut *mut OrtValue,
+        ) -> *mut OrtStatus = self.api.slot(SLOT_CREATE_TENSOR_WITH_DATA_AS_ORT_VALUE);
+
+        self.api.check(create_tensor(
+            self.memory_info,
+            self.input_buf.as_mut_ptr() as *mut c_void,
+            std::mem::size_of_val(&*self.input_buf),
+            self.input_shape.as_ptr(),
+            self.input_shape.len(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+            &mut self.input_val,
+        ))?;
+
+        self.api.check(create_tensor(
+            self.memory_info,
+            self.output_buf.as_mut_ptr() as *mut c_void,
+            std::mem::size_of_val(&*self.output_buf),
+            self.output_shape.as_ptr(),
+            self.output_shape.len(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+            &mut self.output_val,
+        ))?;
+        Ok(())
     }
 
     unsafe fn inspect_io(&mut self) -> Result<()> {
@@ -421,8 +550,9 @@ impl OrtDynamicBackend {
         self.output_name = CString::new(out_name_str)?;
 
         let (in_shape, in_elems) = self.read_tensor_dims(true)?;
-        let (_out_shape, out_elems) = self.read_tensor_dims(false)?;
+        let (out_shape, out_elems) = self.read_tensor_dims(false)?;
         self.input_shape = in_shape;
+        self.output_shape = out_shape;
         self.input_dim = in_elems;
         self.output_dim = out_elems;
         Ok(())
@@ -506,6 +636,12 @@ impl PolicyBackend for OrtDynamicBackend {
     }
 
     fn infer(&mut self, obs: &[f32]) -> Result<Vec<f32>> {
+        let mut out = vec![0.0_f32; self.output_dim];
+        self.infer_into(obs, &mut out)?;
+        Ok(out)
+    }
+
+    fn infer_into(&mut self, obs: &[f32], out: &mut [f32]) -> Result<()> {
         if obs.len() != self.input_dim {
             bail!(
                 "ONNX policy expects {} floats for shape {:?}, got {}",
@@ -514,33 +650,21 @@ impl PolicyBackend for OrtDynamicBackend {
                 obs.len()
             );
         }
+        if out.len() != self.output_dim {
+            bail!(
+                "ONNX policy output buffer length {} != expected {}",
+                out.len(),
+                self.output_dim
+            );
+        }
 
-        let mut local_obs = obs.to_vec();
+        self.input_buf.copy_from_slice(obs);
+
         unsafe {
-            let mut input_val: *mut OrtValue = ptr::null_mut();
-            let create_tensor: unsafe extern "system" fn(
-                *const OrtMemoryInfo,
-                *mut c_void,
-                usize,
-                *const i64,
-                usize,
-                u32,
-                *mut *mut OrtValue,
-            ) -> *mut OrtStatus = self.api.slot(SLOT_CREATE_TENSOR_WITH_DATA_AS_ORT_VALUE);
-            self.api.check(create_tensor(
-                self.memory_info,
-                local_obs.as_mut_ptr() as *mut c_void,
-                std::mem::size_of_val(local_obs.as_slice()),
-                self.input_shape.as_ptr(),
-                self.input_shape.len(),
-                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-                &mut input_val,
-            ))?;
-
             let in_names = [self.input_name.as_ptr()];
             let out_names = [self.output_name.as_ptr()];
-            let inputs = [input_val as *const OrtValue];
-            let mut output_val: *mut OrtValue = ptr::null_mut();
+            let inputs = [self.input_val as *const OrtValue];
+            let mut outputs = [self.output_val];
 
             let run_fn: unsafe extern "system" fn(
                 *mut OrtSession,
@@ -553,7 +677,7 @@ impl PolicyBackend for OrtDynamicBackend {
                 *mut *mut OrtValue,
             ) -> *mut OrtStatus = self.api.slot(SLOT_RUN);
 
-            let run_res = self.api.check(run_fn(
+            self.api.check(run_fn(
                 self.session,
                 ptr::null(),
                 in_names.as_ptr(),
@@ -561,36 +685,38 @@ impl PolicyBackend for OrtDynamicBackend {
                 1,
                 out_names.as_ptr(),
                 1,
-                &mut output_val,
-            ));
+                outputs.as_mut_ptr(),
+            ))?;
 
-            let release_val: unsafe extern "system" fn(*mut OrtValue) =
-                self.api.slot(SLOT_RELEASE_VALUE);
-            release_val(input_val);
-
-            if let Err(err) = run_res {
-                if !output_val.is_null() {
-                    release_val(output_val);
+            // Fast path: ORT wrote directly into our pre-bound output_buf (zero alloc).
+            // Defensive fallback: if an ORT version replaced outputs[0], read & release it.
+            if outputs[0] == self.output_val {
+                out.copy_from_slice(&self.output_buf);
+                Ok(())
+            } else {
+                let mut data_ptr: *mut c_void = ptr::null_mut();
+                let get_data: unsafe extern "system" fn(
+                    *mut OrtValue,
+                    *mut *mut c_void,
+                ) -> *mut OrtStatus = self.api.slot(SLOT_GET_TENSOR_MUTABLE_DATA);
+                let data_res = self.api.check(get_data(outputs[0], &mut data_ptr));
+                let result = match data_res {
+                    Ok(()) if !data_ptr.is_null() => {
+                        let slice =
+                            std::slice::from_raw_parts(data_ptr as *const f32, self.output_dim);
+                        out.copy_from_slice(slice);
+                        Ok(())
+                    }
+                    Ok(()) => Err(anyhow!("ONNX Runtime returned null output data pointer")),
+                    Err(err) => Err(err),
+                };
+                if !outputs[0].is_null() {
+                    let release_val: unsafe extern "system" fn(*mut OrtValue) =
+                        self.api.slot(SLOT_RELEASE_VALUE);
+                    release_val(outputs[0]);
                 }
-                return Err(err);
+                result
             }
-
-            let mut data_ptr: *mut c_void = ptr::null_mut();
-            let get_data: unsafe extern "system" fn(
-                *mut OrtValue,
-                *mut *mut c_void,
-            ) -> *mut OrtStatus = self.api.slot(SLOT_GET_TENSOR_MUTABLE_DATA);
-            let data_res = self.api.check(get_data(output_val, &mut data_ptr));
-            let result = match data_res {
-                Ok(()) if !data_ptr.is_null() => {
-                    let slice = std::slice::from_raw_parts(data_ptr as *const f32, self.output_dim);
-                    Ok(slice.to_vec())
-                }
-                Ok(()) => Err(anyhow!("ONNX Runtime returned null output data pointer")),
-                Err(err) => Err(err),
-            };
-            release_val(output_val);
-            result
         }
     }
 }
