@@ -250,20 +250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "doso-brain"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "doso-core",
- "doso-hal",
- "doso-policy",
- "doso-safety",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "doso-brainstem"
+name = "doso-runtime"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -271,76 +258,20 @@ dependencies = [
  "base64",
  "brainstem-dds-bridge",
  "clap",
- "doso-brain",
- "doso-core",
- "doso-hal",
- "doso-policy",
- "doso-safety",
  "doso-sdk",
  "doso-shm-ipc",
  "libc",
- "prost",
+ "libloading",
  "prost-types",
  "ring",
  "serde",
  "serde_json",
  "serde_yaml",
- "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "doso-cli"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "doso-policy",
- "serde",
- "serde_yaml",
- "tokio",
-]
-
-[[package]]
-name = "doso-core"
-version = "0.3.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "doso-hal"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "doso-core",
- "libc",
-]
-
-[[package]]
-name = "doso-policy"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "doso-core",
- "libloading",
- "ring",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "doso-safety"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "doso-core",
- "doso-hal",
 ]
 
 [[package]]

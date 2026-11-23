@@ -1,9 +1,0 @@
-[package]
-name = "doso-core"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-description = "Zero-IO deterministic core types, kinematics, FSM, and control arbitration for DOSO Brainstem"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }

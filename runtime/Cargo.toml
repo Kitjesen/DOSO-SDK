@@ -1,19 +1,38 @@
-[workspace]
-resolver = "2"
-members = [
-    "core",
-    "hal",
-    "safety",
-    "policy",
-    "brain",
-    "brainstem",
-    "cli",
-]
-
-[workspace.package]
+[package]
+name = "doso-runtime"
 version = "0.3.0"
 edition = "2021"
 publish = false
+description = "Unified single-package Rust Brainstem runtime for DOSO robots (hardware drivers, arbitration, locomotion FSM, declarative ONNX policy engine, safety gate, and gRPC/HTTP server)"
+
+[[bin]]
+name = "doso-brainstem"
+path = "src/bin/doso-brainstem.rs"
+
+[[bin]]
+name = "doso-cli"
+path = "src/bin/doso-cli.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+brainstem-dds-bridge = { path = "../bridges/brainstem-dds-bridge" }
+clap = { version = "4", features = ["derive", "env"] }
+doso-sdk = { path = ".." }
+doso-shm-ipc = { path = "../bridges/doso-shm-ipc" }
+libc = "0.2"
+libloading = "0.8"
+prost-types = "0.14"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 opt-level = 3
