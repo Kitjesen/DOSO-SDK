@@ -22,29 +22,14 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install ONNX Runtime C-API (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          ORT_VER="1.19.2"
-          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-linux-x64-${ORT_VER}.tgz" -o /tmp/ort.tgz
-          mkdir -p /tmp/ort
-          tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
-          test -f /tmp/ort/lib/libonnxruntime.so
-          echo "ONNXRUNTIME_DLL_PATH=/tmp/ort/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Install ONNX Runtime C-API (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Install ONNX Runtime C-API
         run: |
-          $ortVer = "1.19.2"
-          $zipPath = Join-Path $env:RUNNER_TEMP "ort.zip"
-          $outDir = Join-Path $env:RUNNER_TEMP "ort"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$ortVer/onnxruntime-win-x64-$ortVer.zip" -OutFile $zipPath
-          Expand-Archive -Path $zipPath -DestinationPath $outDir -Force
-          $dll = Join-Path $outDir "onnxruntime-win-x64-$ortVer\lib\onnxruntime.dll"
-          if (-not (Test-Path $dll)) { throw "Missing ONNX Runtime DLL at $dll" }
-          "ONNXRUNTIME_DLL_PATH=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          python -m pip install --quiet onnxruntime
+          python -c "import os, pathlib, sys, onnxruntime; capi = pathlib.Path(onnxruntime.__file__).resolve().parent / 'capi'; lib = (capi / 'onnxruntime.dll') if sys.platform == 'win32' else sorted(capi.glob('libonnxruntime.so*'))[0]; assert lib.is_file(), f'missing ORT lib in {capi}'; print('ORT:', onnxruntime.__version__, lib); open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8').write(f'ONNXRUNTIME_DLL_PATH={lib}\n')"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
