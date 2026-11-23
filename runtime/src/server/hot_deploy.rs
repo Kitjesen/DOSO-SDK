@@ -101,6 +101,8 @@ struct HealthCorePayload {
     strategy_ready: bool,
     can_read_only: bool,
     active_profile: String,
+    imu_online: bool,
+    online_joints: u8,
     uptime_s: u64,
 }
 
@@ -180,6 +182,59 @@ struct RollbackResponse {
     slot: String,
     restored_policy: String,
     active_profile: String,
+}
+
+/// Resolves `(version, release_id)` from sibling `release.json` or `metadata.json`
+/// in the deployed release root (e.g. `/opt/doso/current/release.json`) when `explicit_release_id`
+/// is unset, falling back to `fallback_version` (e.g. `DOSO_FIRMWARE_VERSION`).
+pub fn resolve_release_metadata(
+    exe_path: Option<&Path>,
+    fallback_version: &str,
+    explicit_release_id: Option<&str>,
+) -> (String, String) {
+    let explicit_rel = explicit_release_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    if let Some(rel) = explicit_rel {
+        return (fallback_version.to_string(), rel);
+    }
+
+    if let Some(exe) = exe_path {
+        let candidates = [
+            exe.parent()
+                .and_then(|p| p.parent())
+                .map(|root| root.join("release.json")),
+            exe.parent()
+                .and_then(|p| p.parent())
+                .map(|root| root.join("metadata.json")),
+            exe.parent().map(|dir| dir.join("release.json")),
+            exe.parent().map(|dir| dir.join("metadata.json")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if let Ok(raw) = std::fs::read_to_string(&cand) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let ver = val
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(fallback_version)
+                        .to_string();
+                    let rel = val
+                        .get("release_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&ver)
+                        .to_string();
+                    return (ver, rel);
+                }
+            }
+        }
+    }
+
+    (fallback_version.to_string(), fallback_version.to_string())
 }
 
 /// Generates a random UUIDv4-formatted per-boot identifier.
@@ -464,20 +519,44 @@ fn persist_slot_bindings(
 }
 
 async fn handle_health(State(state): State<HotDeployState>) -> impl IntoResponse {
-    let (ok, brainstem_ready, strategy_ready, can_read_only, active_profile, uptime_s) = {
-        let now = state.shared.now_us();
-        let guard = state
+    // Lock-free relative to the 200Hz `engine` mutex: read exclusively from `RwLock<TelemetrySnapshot>`.
+    let (
+        ok,
+        brainstem_ready,
+        strategy_ready,
+        can_read_only,
+        active_profile,
+        imu_online,
+        online_joints,
+        uptime_s,
+    ) = {
+        let tele = state
             .shared
-            .engine
-            .lock()
+            .telemetry
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let st = guard.status_snapshot(now);
-        let active = guard.policies.active_name().to_string();
+        let active = tele.status.active_profile.clone();
         let strat_ready = !active.is_empty();
-        let bs_ready = strat_ready && !st.critical_motor_fault;
-        let can_ro = !guard.hal.tx_enabled();
+        let imu_ok = tele.proprio.imu.online;
+        let joints_ok = tele.proprio.online_mask().count_ones() as u8;
+        let hardware_liveness_ok = if tele.hal_backend == "socketcan" {
+            imu_ok && joints_ok == 16 && tele.hal_rx_frames > 0
+        } else {
+            true
+        };
+        let bs_ready = strat_ready && !tele.status.critical_motor_fault && hardware_liveness_ok;
+        let can_ro = tele.can_read_only;
         let up = state.shared.boot_instant.elapsed().as_secs();
-        (bs_ready, bs_ready, strat_ready, can_ro, active, up)
+        (
+            bs_ready,
+            bs_ready,
+            strat_ready,
+            can_ro,
+            active,
+            imu_ok,
+            joints_ok,
+            up,
+        )
     };
 
     let core = HealthCorePayload {
@@ -489,6 +568,8 @@ async fn handle_health(State(state): State<HotDeployState>) -> impl IntoResponse
         strategy_ready,
         can_read_only,
         active_profile,
+        imu_online,
+        online_joints,
         uptime_s,
     };
 

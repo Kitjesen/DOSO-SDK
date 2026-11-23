@@ -18,8 +18,9 @@ use doso_runtime::safety::{
 };
 use doso_runtime::server::{
     build_hot_deploy_router_with_config, generate_boot_id, parse_watchdog_env_from_os,
-    preload_packages, write_boot_id_marker, BrainstemGrpcServer, HotDeployConfig,
-    LocalStatusGrpcServer, SharedBrain, SystemdWatchdog, DEFAULT_BOOT_ID_MARKER_PATH,
+    preload_packages, resolve_release_metadata, write_boot_id_marker, BrainstemGrpcServer,
+    HotDeployConfig, LocalStatusGrpcServer, SharedBrain, SystemdWatchdog,
+    DEFAULT_BOOT_ID_MARKER_PATH,
 };
 use doso_runtime::types::{MitCmd16, MitTarget};
 use doso_sdk::internal::motion_board::rpc::{
@@ -74,7 +75,11 @@ struct Args {
     gateway_listen: String,
 
     /// Zero-restart `<10s` Policy Hot-Deploy & `/health` HTTP API listen address.
-    #[arg(long, env = "DOSO_POLICY_ADMIN_LISTEN", default_value = "0.0.0.0:5054")]
+    #[arg(
+        long,
+        env = "DOSO_POLICY_ADMIN_LISTEN",
+        default_value = "127.0.0.1:5054"
+    )]
     admin_listen: String,
 
     /// Optional Bearer token guarding `/v1/policies*` endpoints (`/health` remains readable).
@@ -370,7 +375,6 @@ async fn main() -> Result<()> {
 
                     let payload = if shm_writer.is_some() {
                         let p = guard.latest_proprio();
-                        let st = guard.status_snapshot(now_us);
                         Some(DosoProprioPayload {
                             sequence: p.sequence,
                             monotonic_us: p.monotonic_us,
@@ -384,10 +388,10 @@ async fn main() -> Result<()> {
                             joint_status: std::array::from_fn(|i| p.joints[i].status_code as u16),
                             joint_online_mask: p.online_mask(),
                             imu_fresh: u8::from(p.imu.online),
-                            cms_state: st.fsm_state.to_public_body_kind() as u8,
-                            control_owner: st.source_owner as u8,
-                            motor_output_enabled: u8::from(st.motor_output_enabled),
-                            critical_motor_fault: u8::from(st.critical_motor_fault),
+                            cms_state: guard.fsm_state().to_public_body_kind() as u8,
+                            control_owner: guard.arbiter.owner() as u8,
+                            motor_output_enabled: u8::from(guard.safety.motor_output_enabled()),
+                            critical_motor_fault: u8::from(guard.has_critical_motor_fault()),
                             _reserved: [0; 9],
                         })
                     } else {
@@ -489,13 +493,19 @@ async fn main() -> Result<()> {
         (None, None)
     };
 
+    let (resolved_version, resolved_release_id) = resolve_release_metadata(
+        std::env::current_exe().ok().as_deref(),
+        &args.firmware_version,
+        args.release_id.as_deref(),
+    );
+
     // 3. Start unified customer-facing `doso.v1` BaseGateway (:5052) in the SAME single process
     let gw_listener = TcpListener::bind(&args.gateway_listen).await?;
     let askme_cfg = args.askme_endpoint.as_ref().map(|ep| AskMeVoiceConfig {
         endpoint: ep.clone(),
         operator_id: "supervisor-1".into(),
         api_token: None,
-        robot_id: "xiaosuan-1".into(),
+        robot_id: args.device_id.clone(),
         timeout: Duration::from_secs(10),
     });
     let gw_cfg = BaseGatewayConfig {
@@ -503,7 +513,7 @@ async fn main() -> Result<()> {
         listen_addr: args.gateway_listen.clone(),
         robot_id: Some(args.device_id.clone()),
         robot_model: hw_params.robot_model.clone(),
-        firmware_version: args.firmware_version.clone(),
+        firmware_version: resolved_version.clone(),
         shm_enabled: args.shm_enabled,
         shm_proprio_name: args.shm_proprio_name.clone(),
         shm_cmd_name: args.shm_cmd_name.clone(),
@@ -522,17 +532,12 @@ async fn main() -> Result<()> {
     // 4. Start <10s Zero-Restart Policy Hot-Deploy & `/health` HTTP API (:5054)
     let admin_listener = TcpListener::bind(&args.admin_listen).await?;
     let admin_addr = admin_listener.local_addr()?;
-    let release_id = args
-        .release_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| args.firmware_version.clone());
     let hot_cfg = HotDeployConfig {
         packages_dir: Some(args.packages_dir.clone()),
         admin_token: args.admin_token.clone(),
         boot_id: boot_id.clone(),
-        version: args.firmware_version.clone(),
-        release_id,
+        version: resolved_version,
+        release_id: resolved_release_id,
         health_signing_key_path: args.health_signing_key.clone(),
     };
     let router = build_hot_deploy_router_with_config(shared.clone(), hot_cfg);

@@ -173,7 +173,7 @@ impl RecoveryRuntime {
         Ok(())
     }
 
-    pub fn enable(&mut self, token: &str, current_pos: JointVec16, now_us: u64) -> Result<()> {
+    pub fn validate_enable(&self, token: &str, now_us: u64) -> Result<()> {
         self.authorize(token, now_us)?;
         if self.phase != RecoveryPhase::Preparing {
             bail!(
@@ -181,6 +181,11 @@ impl RecoveryRuntime {
                 self.phase
             );
         }
+        Ok(())
+    }
+
+    pub fn enable(&mut self, token: &str, current_pos: JointVec16, now_us: u64) -> Result<()> {
+        self.validate_enable(token, now_us)?;
         self.hold_pose = current_pos.discard_wheels();
         self.phase = RecoveryPhase::Waiting;
         self.phase_ticks = 0;

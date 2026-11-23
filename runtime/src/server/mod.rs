@@ -13,8 +13,8 @@ use crate::policy::LoadedPolicyPackage;
 pub use grpc::{BrainstemGrpcServer, LocalStatusGrpcServer, SharedBrain, TelemetrySnapshot};
 pub use hot_deploy::{
     build_hot_deploy_router, build_hot_deploy_router_with_config, generate_boot_id,
-    write_boot_id_marker, HotDeployConfig, PersistedSlotBindings, PushPolicyRequest,
-    RollbackRequest, DEFAULT_BOOT_ID_MARKER_PATH, SLOT_BINDINGS_FILE,
+    resolve_release_metadata, write_boot_id_marker, HotDeployConfig, PersistedSlotBindings,
+    PushPolicyRequest, RollbackRequest, DEFAULT_BOOT_ID_MARKER_PATH, SLOT_BINDINGS_FILE,
 };
 pub use watchdog::{
     build_systemd_notify_args, default_sd_notify, parse_watchdog_env, parse_watchdog_env_from_os,

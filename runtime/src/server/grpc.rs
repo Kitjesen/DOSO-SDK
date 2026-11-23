@@ -24,10 +24,14 @@ pub struct TelemetrySnapshot {
     pub status: BrainStatusSnapshot,
     pub history_seq: u64,
     pub latest_history: Option<HistoryFrameSnapshot>,
+    pub can_read_only: bool,
+    pub hal_backend: &'static str,
+    pub hal_rx_frames: u64,
 }
 
 impl TelemetrySnapshot {
     pub fn from_engine(engine: &BrainEngine, now_us: u64) -> Self {
+        let diag = engine.hal.diagnostics();
         Self {
             updated_us: now_us,
             refresh_count: 0,
@@ -35,6 +39,9 @@ impl TelemetrySnapshot {
             status: engine.status_snapshot(now_us),
             history_seq: engine.history_seq(),
             latest_history: engine.latest_history().cloned(),
+            can_read_only: !engine.hal.tx_enabled(),
+            hal_backend: diag.backend_name,
+            hal_rx_frames: diag.rx_frames,
         }
     }
 }
@@ -68,23 +75,45 @@ impl SharedBrain {
     }
 
     /// Refreshes the decoupled `RwLock<TelemetrySnapshot>` cache while holding `&BrainEngine`.
-    /// Lock hierarchy is strictly `engine -> telemetry` (telemetry readers never lock `engine`).
+    /// Lock hierarchy is strictly `engine -> telemetry` (telemetry readers never lock `engine`),
+    /// reusing existing `String`/`Vec` buffers in place to keep steady-state 200Hz ticks zero-alloc.
     pub fn refresh_telemetry(&self, guard: &BrainEngine, now_us: u64) {
         let proprio = *guard.latest_proprio();
-        let status = guard.status_snapshot(now_us);
         let new_hist_seq = guard.history_seq();
+        let can_read_only = !guard.hal.tx_enabled();
+        let diag = guard.hal.diagnostics();
         let mut cache = self
             .telemetry
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.copy_status_into(now_us, &mut cache.status);
         if cache.history_seq != new_hist_seq
             || (cache.latest_history.is_none() && guard.latest_history().is_some())
         {
-            cache.latest_history = guard.latest_history().cloned();
+            if let Some(src) = guard.latest_history() {
+                if let Some(dst) = cache.latest_history.as_mut() {
+                    dst.monotonic_us = src.monotonic_us;
+                    dst.gyro_rad_s = src.gyro_rad_s;
+                    dst.projected_gravity = src.projected_gravity;
+                    dst.walk_cmd = src.walk_cmd;
+                    dst.joint_pos = src.joint_pos;
+                    dst.joint_vel = src.joint_vel;
+                    dst.action = src.action;
+                    dst.next_action = src.next_action;
+                    dst.kp = src.kp;
+                    dst.kd = src.kd;
+                    dst.observation.clear();
+                    dst.observation.extend_from_slice(&src.observation);
+                } else {
+                    cache.latest_history = Some(src.clone());
+                }
+            }
             cache.history_seq = new_hist_seq;
         }
         cache.proprio = proprio;
-        cache.status = status;
+        cache.can_read_only = can_read_only;
+        cache.hal_backend = diag.backend_name;
+        cache.hal_rx_frames = diag.rx_frames;
         cache.updated_us = now_us;
         cache.refresh_count = cache.refresh_count.wrapping_add(1);
     }
@@ -1201,10 +1230,8 @@ impl rpc::robot_recovery_server::RobotRecovery for BrainstemGrpcServer {
         let tok = req.into_inner().session_token;
         let now = self.shared.now_us();
         let mut guard = self.shared.engine.lock().unwrap();
-        let pos = guard.latest_proprio().positions();
         guard
-            .recovery
-            .enable(&tok, pos, now)
+            .recovery_enable(&tok, now)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         self.shared.refresh_telemetry(&guard, now);
         Ok(Response::new(to_rpc_rec_status(

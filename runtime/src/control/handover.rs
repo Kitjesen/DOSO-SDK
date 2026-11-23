@@ -100,6 +100,10 @@ impl BodyHeightController {
         self.handover_progress = 0;
     }
 
+    pub fn reset_handover(&mut self) {
+        self.handover_progress = self.handover_frames;
+    }
+
     /// Advances `current_m` toward `target_m` at `rate_mps * dt_s`.
     pub fn tick_height(&mut self, dt_s: f64) -> f64 {
         if !self.supported {

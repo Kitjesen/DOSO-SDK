@@ -16,8 +16,8 @@ DOSO 端云协同 OTA 由以下三层组成：
 
 | 通道 | 云端端点前缀 | 机载/终端接收方 | 核心作用 |
 | :--- | :--- | :--- | :--- |
-| `policy_package`（运动策略包） | `/v1/releases` + `/v1/jobs` | `doso-ota` -> `doso-brainstem`（`:5054/v1/policies/push`） | 热部署 `.tar.gz` 策略包（`flat` / `stairs` / `recovery` 等），主控制环不停机更新 |
-| `brainstem_release`（底座二进制） | `/v1/releases` + `/v1/jobs` | `doso-ota` -> 底座二进制切换与重启 | 升级 `doso-brainstem` 与相关发行包 |
+| `policy_package`（运动策略包） | `/v1/devices/{device_id}/firmware/{releases,jobs}` + `/v1/agent/devices/{device_id}/*` | `doso-ota` -> `doso-brainstem`（`:5054/v1/policies/push`） | 热部署 `.tar.gz` 策略包（`flat` / `stairs` / `recovery` 等），主控制环不停机更新 |
+| `brainstem_release`（底座二进制） | `/v1/devices/{device_id}/firmware/{releases,jobs}` + `/v1/agent/devices/{device_id}/*` | `doso-ota` -> 底座二进制切换与重启 | 升级 `doso-brainstem` 与相关发行包 |
 | `android_apk`（手机遥控 App） | `/v1/apps/android/latest` & `/v1/apps/android/releases` | DOSO Android 客户端 App | 分发 App 安装包与强制/可选版本更新元数据 |
 
 ---
@@ -71,10 +71,10 @@ sha256sum dist/<PACKAGE_NAME>.tar.gz
 
 使用运维工具或受控凭证将 `dist/<PACKAGE_NAME>.tar.gz` 上传至 `oss://doso-ota-prod-shanghai/policies/<RELEASE_TAG>/<PACKAGE_NAME>.tar.gz`，并确保服务端具备对该前缀的读取签名权限（生产环境禁止在脚本或仓库中硬编码 OSS 密钥）。
 
-### Step 3：向云端注册 Release（以 `policy_package` 为例）
+### Step 3：向云端下发 Release（按设备 `/v1/devices/<DEVICE_UUID>/firmware/releases`）
 
 ```bash
-curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/releases" \
+curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/devices/<DEVICE_UUID>/firmware/releases" \
   -H "Authorization: Bearer <API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -95,11 +95,10 @@ curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/releases" \
 ### Step 4：对目标机器狗创建下发 Job
 
 ```bash
-curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/jobs" \
+curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/devices/<DEVICE_UUID>/firmware/jobs" \
   -H "Authorization: Bearer <API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
-    "device_id": "<DEVICE_UUID>",
     "release_id": "<RELEASE_ID>"
   }'
 ```
@@ -110,7 +109,7 @@ curl -sS -X POST "https://api-test.dosorobotics.com/ota/v1/jobs" \
 
 ```bash
 # 1. 查询 Job 执行状态（queued -> downloading -> succeeded / failed）
-curl -sS "https://api-test.dosorobotics.com/ota/v1/jobs/<JOB_ID>" \
+curl -sS "https://api-test.dosorobotics.com/ota/v1/devices/<DEVICE_UUID>/firmware/jobs/<JOB_ID>" \
   -H "Authorization: Bearer <API_TOKEN>"
 
 # 2. 查询远端设备上报的实时 slot / 策略版本与在线心跳
