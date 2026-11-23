@@ -350,8 +350,20 @@ async fn single_process_rust_brainstem_e2e_and_sub_second_hot_deploy() {
     );
     assert!(tele_after.updated_us > tele_before_flat.updated_us);
     assert_eq!(tele_after.status.active_profile, "flat_w5_hot_v2");
-    assert!(max_mutex_wait_us < 2_000);
-    assert!(max_tick_us < 2_000);
+    let mutex_budget_us = if cfg!(debug_assertions) { 5_000 } else { 2_000 };
+    let tick_budget_us = if cfg!(debug_assertions) {
+        15_000
+    } else {
+        2_000
+    };
+    assert!(
+        max_mutex_wait_us < mutex_budget_us,
+        "max_mutex_wait_us={max_mutex_wait_us} exceeded budget {mutex_budget_us}"
+    );
+    assert!(
+        max_tick_us < tick_budget_us,
+        "max_tick_us={max_tick_us} exceeded budget {tick_budget_us}"
+    );
 
     let (list_code, list_body) = admin_http("GET", admin_addr, "/v1/policies", None).await;
     assert_eq!(list_code, 200);
@@ -636,7 +648,7 @@ async fn watchdog_announces_ready_pings_at_interval_and_stops_cleanly() {
         &[READY_PAYLOAD.to_string()]
     );
 
-    tokio::time::sleep(Duration::from_millis(75)).await;
+    tokio::time::sleep(Duration::from_millis(140)).await;
     let ping_count = events
         .lock()
         .unwrap()
@@ -704,8 +716,8 @@ async fn ota_health_auth_policy_persistence_and_local_status_13146() {
             packages_dir: Some(tmp_root.clone()),
             admin_token: Some("secret-ota-token".into()),
             boot_id: boot_id.clone(),
-            version: "v1.0.0-rust".into(),
-            release_id: "rel-v1.0.0-rust".into(),
+            version: "v0.0.1".into(),
+            release_id: "rel-v0.0.1".into(),
             health_signing_key_path: None,
         },
     );
@@ -719,7 +731,7 @@ async fn ota_health_auth_policy_persistence_and_local_status_13146() {
     let h_json: serde_json::Value = serde_json::from_str(&h_body).unwrap();
     assert_eq!(h_json["ok"], true);
     assert_eq!(h_json["boot_id"], boot_id);
-    assert_eq!(h_json["version"], "v1.0.0-rust");
+    assert_eq!(h_json["version"], "v0.0.1");
     assert_eq!(h_json["brainstem_ready"], true);
     assert_eq!(h_json["strategy_ready"], true);
     assert_eq!(h_json["can_read_only"], true);

@@ -32,7 +32,7 @@ pub struct HotDeployConfig {
     pub admin_token: Option<String>,
     /// Unique per-boot identifier returned in `GET /health` and written to `/run/doso/brainstem.boot_id`.
     pub boot_id: String,
-    /// Firmware/runtime version string (e.g. `v1.0.0-rust`).
+    /// Firmware/runtime version string (e.g. `v0.0.1`).
     pub version: String,
     /// Release identifier (defaults to `version`).
     pub release_id: String,
@@ -46,8 +46,8 @@ impl Default for HotDeployConfig {
             packages_dir: None,
             admin_token: None,
             boot_id: generate_boot_id(),
-            version: "v1.0.0-rust".to_string(),
-            release_id: "v1.0.0-rust".to_string(),
+            version: "v0.0.1".to_string(),
+            release_id: "v0.0.1".to_string(),
             health_signing_key_path: None,
         }
     }

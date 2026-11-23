@@ -1,6 +1,6 @@
 [package]
 name = "doso-runtime"
-version = "0.3.0"
+version = "0.0.1"
 edition = "2021"
 publish = false
 description = "Unified single-package Rust Brainstem runtime for DOSO robots (hardware drivers, arbitration, locomotion FSM, declarative ONNX policy engine, safety gate, and gRPC/HTTP server)"

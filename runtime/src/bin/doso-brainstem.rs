@@ -92,7 +92,7 @@ struct Args {
     #[arg(long, env = "DOSO_DEVICE_ID", default_value = "THUNDER-RUST-001")]
     device_id: String,
 
-    #[arg(long, env = "DOSO_FIRMWARE_VERSION", default_value = "v1.0.0-rust")]
+    #[arg(long, env = "DOSO_FIRMWARE_VERSION", default_value = "v0.0.1")]
     firmware_version: String,
 
     #[arg(long, env = "DOSO_RELEASE_ID")]
