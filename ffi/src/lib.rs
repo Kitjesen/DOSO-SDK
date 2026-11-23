@@ -4,6 +4,7 @@
 
 use doso_sdk::{
     ExternalControl, JointCommand, Pose, RobotClient, RobotConfig, Teleop, TeleopVelocity,
+    VoiceSpeakOptions,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr};
@@ -25,6 +26,7 @@ pub struct DosoCapabilities {
     pub localization: u8,
     pub tasks: u8,
     pub board_b_autonomy: u8,
+    pub voice: u8,
 }
 
 #[repr(C)]
@@ -42,6 +44,18 @@ pub struct DosoBodyControlStatus {
     pub last_accepted_sequence: u64,
     pub accepted_count: u64,
     pub rejected_count: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DosoBodyHeightStatus {
+    pub supported: u8,
+    pub _pad: [u8; 7],
+    pub current_height_m: f64,
+    pub target_height_m: f64,
+    pub min_height_m: f64,
+    pub max_height_m: f64,
+    pub rate_mps: f64,
 }
 
 #[repr(C)]
@@ -463,6 +477,7 @@ pub unsafe extern "C" fn doso_robot_capabilities(
         let tasks = snapshot_bool(fields, "tasks").unwrap_or(false);
         let board_b_autonomy =
             snapshot_bool(fields, "board_b_autonomy").unwrap_or(navigation || maps || localization);
+        let voice = snapshot_bool(fields, "voice").unwrap_or(false);
         *out = DosoCapabilities {
             motion: u8::from(motion),
             low_level: u8::from(low_level),
@@ -472,6 +487,7 @@ pub unsafe extern "C" fn doso_robot_capabilities(
             localization: u8::from(localization),
             tasks: u8::from(tasks),
             board_b_autonomy: u8::from(board_b_autonomy),
+            voice: u8::from(voice),
         };
         Ok(())
     })
@@ -595,6 +611,213 @@ pub unsafe extern "C" fn doso_sport_clear_joint_fault(
             .block_on(robot.client.sport().clear_motor_fault([joint_id], None))
             .map_err(map_sdk_err)?;
         map_receipt(receipt)
+    })
+}
+
+fn map_body_height_status(s: doso_sdk::BodyHeightStatus) -> DosoBodyHeightStatus {
+    DosoBodyHeightStatus {
+        supported: u8::from(s.supported),
+        _pad: [0; 7],
+        current_height_m: s.current_height_m,
+        target_height_m: s.target_height_m,
+        min_height_m: s.min_height_m,
+        max_height_m: s.max_height_m,
+        rate_mps: s.rate_mps,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_body_height_status(
+    robot: *const DosoRobot,
+    out_status: *mut DosoBodyHeightStatus,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let out = out_status.as_mut().ok_or("out_status pointer is null")?;
+        let status = runtime()
+            .block_on(robot.client.sport().body_height_status())
+            .map_err(map_sdk_err)?;
+        *out = map_body_height_status(status);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_set_body_height(
+    robot: *const DosoRobot,
+    height_m: f64,
+    out_status: *mut DosoBodyHeightStatus,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let status = runtime()
+            .block_on(robot.client.sport().set_body_height(height_m, None))
+            .map_err(map_sdk_err)?;
+        if let Some(out) = out_status.as_mut() {
+            *out = map_body_height_status(status);
+        }
+        Ok(())
+    })
+}
+
+fn recovery_status_to_json(s: &doso_sdk::RecoveryStatus) -> String {
+    format!(
+        "{{\"availability\":{},\"phase\":{},\"operation_id\":{},\"unavailable_reason\":{},\"selected\":{},\"session_token\":{},\"motor_disable_confirmed\":{}}}",
+        s.availability,
+        s.phase,
+        json_quote(&s.operation_id),
+        json_quote(&s.unavailable_reason),
+        s.selected,
+        json_quote(&s.session_token),
+        s.motor_disable_confirmed,
+    )
+}
+
+fn recovery_action_to_json(r: &doso_sdk::RecoveryActionReply) -> String {
+    format!(
+        "{{\"operation_id\":{},\"decision\":{},\"phase\":{},\"reason\":{}}}",
+        json_quote(&r.operation_id),
+        r.decision,
+        r.phase,
+        json_quote(&r.reason),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_status_json(
+    robot: *const DosoRobot,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let status = runtime()
+            .block_on(robot.client.sport().recovery_status())
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_status_to_json(&status), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_enter_json(
+    robot: *const DosoRobot,
+    operation_id: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let operation_id = required_str(operation_id, "operation_id")?;
+        let status = runtime()
+            .block_on(robot.client.sport().recovery_enter(operation_id, None))
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_status_to_json(&status), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_enable_json(
+    robot: *const DosoRobot,
+    session_token: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let session_token = required_str(session_token, "session_token")?;
+        let status = runtime()
+            .block_on(robot.client.sport().recovery_enable(session_token, None))
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_status_to_json(&status), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_heartbeat_json(
+    robot: *const DosoRobot,
+    session_token: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let session_token = required_str(session_token, "session_token")?;
+        let status = runtime()
+            .block_on(robot.client.sport().recovery_heartbeat(session_token, None))
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_status_to_json(&status), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_start_json(
+    robot: *const DosoRobot,
+    operation_id: *const c_char,
+    session_token: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let operation_id = required_str(operation_id, "operation_id")?;
+        let session_token = required_str(session_token, "session_token")?;
+        let reply = runtime()
+            .block_on(
+                robot
+                    .client
+                    .sport()
+                    .recovery_start(operation_id, session_token, None),
+            )
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_action_to_json(&reply), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_cancel_json(
+    robot: *const DosoRobot,
+    operation_id: *const c_char,
+    session_token: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let operation_id = required_str(operation_id, "operation_id")?;
+        let session_token = required_str(session_token, "session_token")?;
+        let reply = runtime()
+            .block_on(
+                robot
+                    .client
+                    .sport()
+                    .recovery_cancel(operation_id, session_token, None),
+            )
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_action_to_json(&reply), buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_sport_recovery_exit_json(
+    robot: *const DosoRobot,
+    session_token: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let session_token = required_str(session_token, "session_token")?;
+        let status = runtime()
+            .block_on(robot.client.sport().recovery_exit(session_token, None))
+            .map_err(map_sdk_err)?;
+        write_c_string(&recovery_status_to_json(&status), buf, cap);
+        Ok(())
     })
 }
 
@@ -1191,6 +1414,253 @@ pub unsafe extern "C" fn doso_nav_cancel(
     })
 }
 
+fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_status_json(
+    robot: *const DosoRobot,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let st = runtime()
+            .block_on(robot.client.voice().status())
+            .map_err(map_sdk_err)?;
+        let json = format!(
+            "{{\"status\":{},\"service\":{},\"active_profile\":{},\"llm_provider\":{},\"llm_model\":{},\"asr_provider\":{},\"tts_provider\":{}}}",
+            json_quote(&st.status),
+            json_quote(&st.service),
+            json_quote(&st.active_profile),
+            json_quote(&st.llm_provider),
+            json_quote(&st.llm_model),
+            json_quote(&st.asr_provider),
+            json_quote(&st.tts_provider),
+        );
+        write_c_string(&json, buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_profiles_json(
+    robot: *const DosoRobot,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let resp = runtime()
+            .block_on(robot.client.voice().list_profiles())
+            .map_err(map_sdk_err)?;
+        let items: Vec<String> = resp
+            .profiles
+            .iter()
+            .map(|p| {
+                format!(
+                    "{{\"profile_id\":{},\"label\":{},\"voice_id\":{},\"category\":{},\"speed\":{},\"volume\":{},\"pitch\":{},\"emotion\":{}}}",
+                    json_quote(&p.profile_id),
+                    json_quote(&p.label),
+                    json_quote(&p.voice_id),
+                    json_quote(&p.category),
+                    p.speed,
+                    p.volume,
+                    p.pitch,
+                    json_quote(&p.emotion),
+                )
+            })
+            .collect();
+        let cues: Vec<String> = resp
+            .available_sound_cues
+            .iter()
+            .map(|c| json_quote(c))
+            .collect();
+        let json = format!(
+            "{{\"active_profile\":{},\"sound_cues_enabled\":{},\"available_sound_cues\":[{}],\"profiles\":[{}]}}",
+            json_quote(&resp.active_profile),
+            if resp.sound_cues_enabled { "true" } else { "false" },
+            cues.join(","),
+            items.join(","),
+        );
+        write_c_string(&json, buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_switch_profile(
+    robot: *const DosoRobot,
+    profile_id: *const c_char,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let profile_id = required_str(profile_id, "profile_id")?;
+        let receipt = runtime()
+            .block_on(robot.client.voice().switch_profile(profile_id, None))
+            .map_err(map_sdk_err)?;
+        map_receipt(receipt)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_speak(
+    robot: *const DosoRobot,
+    text: *const c_char,
+    priority: *const c_char,
+    queue_policy: *const c_char,
+    voice_profile_id: *const c_char,
+    playback_id_buf: *mut c_char,
+    playback_id_cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let text = required_str(text, "text")?;
+        let opts = VoiceSpeakOptions {
+            priority: optional_str(priority)?.unwrap_or("normal").to_owned(),
+            queue_policy: optional_str(queue_policy)?.unwrap_or("enqueue").to_owned(),
+            voice_profile_id: optional_str(voice_profile_id)?.unwrap_or("").to_owned(),
+            ..VoiceSpeakOptions::default()
+        };
+        let pb = runtime()
+            .block_on(robot.client.voice().speak(text, opts, None))
+            .map_err(map_sdk_err)?;
+        write_c_string(&pb.playback_id, playback_id_buf, playback_id_cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_playback_status_json(
+    robot: *const DosoRobot,
+    playback_id: *const c_char,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let playback_id = required_str(playback_id, "playback_id")?;
+        let pb = runtime()
+            .block_on(robot.client.voice().playback_status(playback_id))
+            .map_err(map_sdk_err)?;
+        let json = format!(
+            "{{\"playback_id\":{},\"state\":{},\"priority\":{},\"text_chars\":{},\"message\":{}}}",
+            json_quote(&pb.playback_id),
+            json_quote(&pb.state),
+            json_quote(&pb.priority),
+            pb.text_chars,
+            json_quote(&pb.message),
+        );
+        write_c_string(&json, buf, cap);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_cancel_playback(
+    robot: *const DosoRobot,
+    playback_id: *const c_char,
+    reason: *const c_char,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let playback_id = required_str(playback_id, "playback_id")?;
+        let reason = optional_str(reason)?.unwrap_or("operator_cancelled");
+        let _ = runtime()
+            .block_on(robot.client.voice().cancel_playback(playback_id, reason, None))
+            .map_err(map_sdk_err)?;
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_switch_component(
+    robot: *const DosoRobot,
+    component: *const c_char,
+    provider: *const c_char,
+    model: *const c_char,
+    validate: u8,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let component = required_str(component, "component")?;
+        let provider = required_str(provider, "provider")?;
+        let model = optional_str(model)?;
+        let receipt = runtime()
+            .block_on(
+                robot
+                    .client
+                    .voice()
+                    .switch_component(component, provider, model, validate != 0, None),
+            )
+            .map_err(map_sdk_err)?;
+        map_receipt(receipt)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_update_prompt(
+    robot: *const DosoRobot,
+    system_prompt: *const c_char,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let system_prompt = required_str(system_prompt, "system_prompt")?;
+        let receipt = runtime()
+            .block_on(robot.client.voice().update_prompt(system_prompt, None))
+            .map_err(map_sdk_err)?;
+        map_receipt(receipt)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn doso_voice_chat_json(
+    robot: *const DosoRobot,
+    text: *const c_char,
+    thread_id: *const c_char,
+    speak_reply: u8,
+    buf: *mut c_char,
+    cap: usize,
+) -> i32 {
+    ffi_status(|| {
+        let robot = robot.as_ref().ok_or("robot handle is null")?;
+        let text = required_str(text, "text")?;
+        let thread_id = optional_str(thread_id)?;
+        let reply = runtime()
+            .block_on(
+                robot
+                    .client
+                    .voice()
+                    .chat(text, thread_id, speak_reply != 0, None),
+            )
+            .map_err(map_sdk_err)?;
+        let json = format!(
+            "{{\"reply_text\":{},\"thread_id\":{},\"turn_id\":{},\"latency_ms\":{}}}",
+            json_quote(&reply.reply_text),
+            json_quote(&reply.thread_id),
+            json_quote(&reply.turn_id),
+            reply.latency_ms,
+        );
+        write_c_string(&json, buf, cap);
+        Ok(())
+    })
+}
+
 #[cfg(any(test, feature = "test-mock"))]
 mod mock_server {
     use super::*;
@@ -1287,6 +1757,7 @@ mod mock_server {
                 "localization",
                 "tasks",
                 "board_b_autonomy",
+                "voice",
             ] {
                 fields.insert(
                     key.to_owned(),
@@ -1480,6 +1951,123 @@ mod mock_server {
             Ok(Response::new(
                 self.ok_receipt(req.into_inner().command, "profile"),
             ))
+        }
+        async fn body_height_status(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> Result<Response<rpc::BodyHeightStatus>, Status> {
+            Ok(Response::new(rpc::BodyHeightStatus {
+                supported: true,
+                current_height_m: 0.375,
+                target_height_m: 0.375,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
+            }))
+        }
+        async fn set_body_height(
+            &self,
+            req: Request<rpc::SetBodyHeightRequest>,
+        ) -> Result<Response<rpc::BodyHeightStatus>, Status> {
+            let inner = req.into_inner();
+            if !inner.height_m.is_finite() || !(0.25..=0.50).contains(&inner.height_m) {
+                return Err(Status::invalid_argument(
+                    "height_m is outside the active profile range",
+                ));
+            }
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::BodyHeightStatus {
+                supported: true,
+                current_height_m: inner.height_m,
+                target_height_m: inner.height_m,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
+            }))
+        }
+        async fn recovery_status(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+            Ok(Response::new(rpc::RecoveryStatus {
+                availability: 2,
+                phase: 1,
+                ..Default::default()
+            }))
+        }
+        async fn recovery_enter(
+            &self,
+            req: Request<rpc::RecoveryStartRequest>,
+        ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::RecoveryStatus {
+                availability: 2,
+                phase: 2,
+                operation_id: req.into_inner().operation_id,
+                selected: true,
+                session_token: "rec-mock-tok".into(),
+                ..Default::default()
+            }))
+        }
+        async fn recovery_enable(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::RecoveryStatus {
+                availability: 2,
+                phase: 3,
+                selected: true,
+                ..Default::default()
+            }))
+        }
+        async fn recovery_heartbeat(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+            Ok(Response::new(rpc::RecoveryStatus {
+                availability: 2,
+                phase: 3,
+                selected: true,
+                ..Default::default()
+            }))
+        }
+        async fn recovery_start(
+            &self,
+            req: Request<rpc::RecoveryStartRequest>,
+        ) -> Result<Response<rpc::RecoveryActionReply>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::RecoveryActionReply {
+                operation_id: req.into_inner().operation_id,
+                decision: 1,
+                phase: 4,
+                reason: String::new(),
+            }))
+        }
+        async fn recovery_cancel(
+            &self,
+            req: Request<rpc::RecoveryCancelRequest>,
+        ) -> Result<Response<rpc::RecoveryActionReply>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::RecoveryActionReply {
+                operation_id: req.into_inner().operation_id,
+                decision: 1,
+                phase: 1,
+                reason: "Motor disable confirmed".into(),
+            }))
+        }
+        async fn recovery_exit(
+            &self,
+            _: Request<rpc::RecoverySessionRequest>,
+        ) -> Result<Response<rpc::RecoveryStatus>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Ok(Response::new(rpc::RecoveryStatus {
+                availability: 2,
+                phase: 1,
+                selected: false,
+                motor_disable_confirmed: true,
+                ..Default::default()
+            }))
         }
         async fn stop(&self, req: Request<rpc::Command>) -> Result<Response<rpc::Receipt>, Status> {
             Ok(Response::new(
@@ -1880,6 +2468,131 @@ mod mock_server {
         }
     }
 
+    #[tonic::async_trait]
+    impl rpc::voice_server::Voice for MockSvc {
+        async fn status(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> Result<Response<rpc::VoiceSystemStatus>, Status> {
+            Ok(Response::new(rpc::VoiceSystemStatus {
+                status: "ready".into(),
+                service: "askme".into(),
+                active_profile: "patrol_default".into(),
+                llm_provider: "deepseek".into(),
+                llm_model: "deepseek-v4-flash".into(),
+                asr_provider: "cloud+local".into(),
+                tts_provider: "minimax".into(),
+                raw_json: "{}".into(),
+            }))
+        }
+        async fn list_profiles(
+            &self,
+            _: Request<rpc::Empty>,
+        ) -> Result<Response<rpc::VoiceProfileList>, Status> {
+            Ok(Response::new(rpc::VoiceProfileList {
+                active_profile: "patrol_default".into(),
+                profiles: vec![rpc::VoiceProfileInfo {
+                    profile_id: "patrol_default".into(),
+                    label: "巡检播报".into(),
+                    voice_id: "male-qn-qingse".into(),
+                    category: "operations".into(),
+                    speed: 1.0,
+                    volume: 1.0,
+                    pitch: 0.0,
+                    emotion: String::new(),
+                }],
+                sound_cues_enabled: true,
+                available_sound_cues: vec!["soft_chime".into()],
+                raw_json: "{}".into(),
+            }))
+        }
+        async fn switch_profile(
+            &self,
+            req: Request<rpc::VoiceSwitchProfileRequest>,
+        ) -> Result<Response<rpc::Receipt>, Status> {
+            Ok(Response::new(
+                self.ok_receipt(req.into_inner().command, "voice_profile_switched"),
+            ))
+        }
+        async fn speak(
+            &self,
+            req: Request<rpc::VoiceSpeakRequest>,
+        ) -> Result<Response<rpc::VoicePlayback>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            let body = req.into_inner();
+            Ok(Response::new(rpc::VoicePlayback {
+                playback_id: "pb-mock-1".into(),
+                state: "queued".into(),
+                priority: body.priority,
+                text_chars: body.text.chars().count() as u32,
+                message: "accepted".into(),
+                raw_json: "{}".into(),
+            }))
+        }
+        async fn playback_status(
+            &self,
+            req: Request<rpc::VoicePlaybackQuery>,
+        ) -> Result<Response<rpc::VoicePlayback>, Status> {
+            Ok(Response::new(rpc::VoicePlayback {
+                playback_id: req.into_inner().playback_id,
+                state: "completed".into(),
+                priority: "normal".into(),
+                text_chars: 6,
+                message: "done".into(),
+                raw_json: "{}".into(),
+            }))
+        }
+        async fn cancel_playback(
+            &self,
+            req: Request<rpc::VoicePlaybackCancelRequest>,
+        ) -> Result<Response<rpc::VoicePlayback>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            let body = req.into_inner();
+            Ok(Response::new(rpc::VoicePlayback {
+                playback_id: body.playback_id,
+                state: "cancelled".into(),
+                priority: "normal".into(),
+                text_chars: 0,
+                message: body.reason,
+                raw_json: "{}".into(),
+            }))
+        }
+        async fn switch_component(
+            &self,
+            req: Request<rpc::VoiceSwitchComponentRequest>,
+        ) -> Result<Response<rpc::Receipt>, Status> {
+            Ok(Response::new(
+                self.ok_receipt(req.into_inner().command, "voice_component_switched"),
+            ))
+        }
+        async fn update_prompt(
+            &self,
+            req: Request<rpc::VoiceUpdatePromptRequest>,
+        ) -> Result<Response<rpc::Receipt>, Status> {
+            Ok(Response::new(
+                self.ok_receipt(req.into_inner().command, "voice_prompt_updated"),
+            ))
+        }
+        async fn chat(
+            &self,
+            req: Request<rpc::VoiceChatRequest>,
+        ) -> Result<Response<rpc::VoiceChatReply>, Status> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            let body = req.into_inner();
+            Ok(Response::new(rpc::VoiceChatReply {
+                reply_text: format!("收到: {}", body.text),
+                thread_id: if body.thread_id.is_empty() {
+                    "conv-mock-1".into()
+                } else {
+                    body.thread_id
+                },
+                turn_id: "turn-1".into(),
+                latency_ms: 42.5,
+                raw_json: "{}".into(),
+            }))
+        }
+    }
+
     pub struct DosoMockServerHandle {
         writes: Arc<AtomicU64>,
         shutdown: Option<oneshot::Sender<()>>,
@@ -1900,7 +2613,8 @@ mod mock_server {
                 .add_service(rpc::observations_server::ObservationsServer::new(
                     svc.clone(),
                 ))
-                .add_service(rpc::navigation_server::NavigationServer::new(svc));
+                .add_service(rpc::navigation_server::NavigationServer::new(svc.clone()))
+                .add_service(rpc::voice_server::VoiceServer::new(svc));
             tokio::spawn(async move {
                 let _ = server
                     .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
@@ -1991,6 +2705,62 @@ mod tests {
             assert_eq!(caps.low_level, 1);
             assert_eq!(caps.observations, 1);
             assert_eq!(caps.board_b_autonomy, 1);
+            assert_eq!(caps.voice, 1);
+
+            let mut vbuf = [0 as c_char; 2048];
+            assert_eq!(doso_voice_status_json(robot, vbuf.as_mut_ptr(), vbuf.len()), 0);
+            let vstatus = CStr::from_ptr(vbuf.as_ptr()).to_str().unwrap();
+            assert!(vstatus.contains("\"service\":\"askme\""));
+            assert!(vstatus.contains("\"llm_model\":\"deepseek-v4-flash\""));
+
+            assert_eq!(doso_voice_profiles_json(robot, vbuf.as_mut_ptr(), vbuf.len()), 0);
+            let vprofs = CStr::from_ptr(vbuf.as_ptr()).to_str().unwrap();
+            assert!(vprofs.contains("\"active_profile\":\"patrol_default\""));
+
+            let c_prof = CString::new("patrol_default").unwrap();
+            assert_eq!(doso_voice_switch_profile(robot, c_prof.as_ptr()), 0);
+            let c_text = CString::new("系统自检通过").unwrap();
+            let mut pb_buf = [0 as c_char; 128];
+            assert_eq!(
+                doso_voice_speak(
+                    robot,
+                    c_text.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    pb_buf.as_mut_ptr(),
+                    pb_buf.len()
+                ),
+                0
+            );
+            assert_eq!(CStr::from_ptr(pb_buf.as_ptr()).to_str().unwrap(), "pb-mock-1");
+            assert_eq!(
+                doso_voice_playback_status_json(robot, pb_buf.as_ptr(), vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
+            assert!(CStr::from_ptr(vbuf.as_ptr())
+                .to_str()
+                .unwrap()
+                .contains("\"state\":\"completed\""));
+            assert_eq!(doso_voice_cancel_playback(robot, pb_buf.as_ptr(), ptr::null()), 0);
+            let c_comp = CString::new("llm").unwrap();
+            let c_prov = CString::new("deepseek").unwrap();
+            let c_model = CString::new("deepseek-v4-flash").unwrap();
+            assert_eq!(
+                doso_voice_switch_component(robot, c_comp.as_ptr(), c_prov.as_ptr(), c_model.as_ptr(), 0),
+                0
+            );
+            let c_prompt = CString::new("你是小算机器狗。").unwrap();
+            assert_eq!(doso_voice_update_prompt(robot, c_prompt.as_ptr()), 0);
+            let c_msg = CString::new("你好").unwrap();
+            assert_eq!(
+                doso_voice_chat_json(robot, c_msg.as_ptr(), ptr::null(), 0, vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
+            assert!(CStr::from_ptr(vbuf.as_ptr())
+                .to_str()
+                .unwrap()
+                .contains("收到: 你好"));
 
             let mut ctrl = DosoBodyControlStatus::default();
             assert_eq!(doso_sport_control_status(robot, &mut ctrl), 0);
@@ -2060,6 +2830,43 @@ mod tests {
             let bow = CString::new("bow").unwrap();
             assert_eq!(doso_sport_play_gesture(robot, bow.as_ptr()), 0);
             assert_eq!(doso_sport_clear_motor_fault(robot), 0);
+
+            let mut bh = DosoBodyHeightStatus::default();
+            assert_eq!(doso_sport_body_height_status(robot, &mut bh), 0);
+            assert_eq!(bh.supported, 1);
+            assert!((bh.current_height_m - 0.375).abs() < 1e-6);
+            assert!((bh.min_height_m - 0.25).abs() < 1e-6);
+            assert!((bh.max_height_m - 0.50).abs() < 1e-6);
+            assert_eq!(doso_sport_set_body_height(robot, 0.42, &mut bh), 0);
+            assert!((bh.target_height_m - 0.42).abs() < 1e-6);
+            assert_ne!(doso_sport_set_body_height(robot, 0.99, ptr::null_mut()), 0);
+
+            assert_eq!(
+                doso_sport_recovery_status_json(robot, vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
+            assert!(CStr::from_ptr(vbuf.as_ptr())
+                .to_str()
+                .unwrap()
+                .contains("\"availability\":2"));
+            let c_op = CString::new("rec-op-1").unwrap();
+            assert_eq!(
+                doso_sport_recovery_enter_json(robot, c_op.as_ptr(), vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
+            assert!(CStr::from_ptr(vbuf.as_ptr())
+                .to_str()
+                .unwrap()
+                .contains("\"session_token\":\"rec-mock-tok\""));
+            let c_tok = CString::new("rec-mock-tok").unwrap();
+            assert_eq!(
+                doso_sport_recovery_heartbeat_json(robot, c_tok.as_ptr(), vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
+            assert_eq!(
+                doso_sport_recovery_exit_json(robot, c_tok.as_ptr(), vbuf.as_mut_ptr(), vbuf.len()),
+                0
+            );
 
             let teleop = doso_teleop_take_control(robot);
             assert!(!teleop.is_null());

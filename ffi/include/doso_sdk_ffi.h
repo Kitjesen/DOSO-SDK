@@ -23,6 +23,7 @@ typedef struct DosoCapabilities {
   uint8_t localization;
   uint8_t tasks;
   uint8_t board_b_autonomy;
+  uint8_t voice;
 } DosoCapabilities;
 
 typedef struct DosoBodyControlStatus {
@@ -39,6 +40,16 @@ typedef struct DosoBodyControlStatus {
   uint64_t accepted_count;
   uint64_t rejected_count;
 } DosoBodyControlStatus;
+
+typedef struct DosoBodyHeightStatus {
+  uint8_t supported;
+  uint8_t _pad[7];
+  double current_height_m;
+  double target_height_m;
+  double min_height_m;
+  double max_height_m;
+  double rate_mps;
+} DosoBodyHeightStatus;
 
 typedef struct DosoImuSnapshot {
   uint8_t available;
@@ -133,6 +144,22 @@ int32_t doso_sport_control_status(const DosoRobot* robot, DosoBodyControlStatus*
 int32_t doso_sport_current_profile(const DosoRobot* robot, char* buf, size_t cap);
 int32_t doso_sport_list_profiles(const DosoRobot* robot, char* buf, size_t cap);
 int32_t doso_sport_list_gestures(const DosoRobot* robot, char* buf, size_t cap);
+int32_t doso_sport_body_height_status(const DosoRobot* robot, DosoBodyHeightStatus* out_status);
+int32_t doso_sport_set_body_height(const DosoRobot* robot, double height_m,
+                                   DosoBodyHeightStatus* out_status);
+int32_t doso_sport_recovery_status_json(const DosoRobot* robot, char* buf, size_t cap);
+int32_t doso_sport_recovery_enter_json(const DosoRobot* robot, const char* operation_id,
+                                       char* buf, size_t cap);
+int32_t doso_sport_recovery_enable_json(const DosoRobot* robot, const char* session_token,
+                                        char* buf, size_t cap);
+int32_t doso_sport_recovery_heartbeat_json(const DosoRobot* robot, const char* session_token,
+                                           char* buf, size_t cap);
+int32_t doso_sport_recovery_start_json(const DosoRobot* robot, const char* operation_id,
+                                       const char* session_token, char* buf, size_t cap);
+int32_t doso_sport_recovery_cancel_json(const DosoRobot* robot, const char* operation_id,
+                                        const char* session_token, char* buf, size_t cap);
+int32_t doso_sport_recovery_exit_json(const DosoRobot* robot, const char* session_token,
+                                      char* buf, size_t cap);
 
 /* Observations: Managed Telemetry Streams + One-Shot Diagnostics */
 DosoTelemetry* doso_observations_start_telemetry(const DosoRobot* robot, uint8_t imu,
@@ -167,6 +194,23 @@ void doso_low_level_free(DosoLowLevel* session);
 int32_t doso_nav_go_to(const DosoRobot* robot, double x, double y, double z, double yaw,
                        char* task_id_buf, size_t task_id_cap);
 int32_t doso_nav_cancel(const DosoRobot* robot, const char* task_id, const char* reason);
+
+/* Voice & Dialogue Management (doso.v1.Voice -> onboard AskMe) */
+int32_t doso_voice_status_json(const DosoRobot* robot, char* buf, size_t cap);
+int32_t doso_voice_profiles_json(const DosoRobot* robot, char* buf, size_t cap);
+int32_t doso_voice_switch_profile(const DosoRobot* robot, const char* profile_id);
+int32_t doso_voice_speak(const DosoRobot* robot, const char* text, const char* priority,
+                         const char* queue_policy, const char* voice_profile_id,
+                         char* playback_id_buf, size_t playback_id_cap);
+int32_t doso_voice_playback_status_json(const DosoRobot* robot, const char* playback_id,
+                                        char* buf, size_t cap);
+int32_t doso_voice_cancel_playback(const DosoRobot* robot, const char* playback_id,
+                                   const char* reason);
+int32_t doso_voice_switch_component(const DosoRobot* robot, const char* component,
+                                    const char* provider, const char* model, uint8_t validate);
+int32_t doso_voice_update_prompt(const DosoRobot* robot, const char* system_prompt);
+int32_t doso_voice_chat_json(const DosoRobot* robot, const char* text, const char* thread_id,
+                             uint8_t speak_reply, char* buf, size_t cap);
 
 /* Optional test mock server (available when built with `test-mock` feature). */
 DosoMockServer* doso_test_mock_server_start(char* endpoint_buf, size_t endpoint_cap);

@@ -1,0 +1,15 @@
+[package]
+name = "doso-brain"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Deterministic CMS FSM and decoupled skill plugins (Locomotion, Gestures, BodyHeight, Recovery, External MIT)"
+
+[dependencies]
+anyhow = "1"
+doso-core = { path = "../core" }
+doso-hal = { path = "../hal" }
+doso-policy = { path = "../policy" }
+doso-safety = { path = "../safety" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

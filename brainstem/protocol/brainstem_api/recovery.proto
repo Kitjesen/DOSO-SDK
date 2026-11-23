@@ -21,6 +21,8 @@ enum RobotModeKind {
   ROBOT_MODE_KIND_UNKNOWN = 0;
   ROBOT_MODE_KIND_LOCOMOTION_PROFILE = 1;
   ROBOT_MODE_KIND_RECOVERY_ACTION = 2;
+  // Height-control policy with a body-height command channel.
+  ROBOT_MODE_KIND_BODY_HEIGHT_PROFILE = 3;
 }
 
 enum RobotModeAvailability {
@@ -37,6 +39,14 @@ message RobotModeCapability {
   // Actual profile ID only for locomotion; empty for recovery.
   string profile_id = 4;
   string unavailable_reason = 5;
+  BodyHeightCapability body_height = 6;
+}
+
+message BodyHeightCapability {
+  double default_height_m = 1;
+  double min_height_m = 2;
+  double max_height_m = 3;
+  double rate_mps = 4;
 }
 
 enum RecoveryPhase {

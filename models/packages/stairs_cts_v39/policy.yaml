@@ -1,0 +1,20 @@
+schema_version: 2
+name: cts_v39_model61128_inherited_pd_20261023
+kind: locomotion
+robot: thunder_v4
+joint_order: thunder_leg_major
+model:
+  file: "../../thunder_cts_moe_v39_model61128_static_b1_arm64.onnx"
+inputs:
+  - { tensor: history, history: { length: 10, layout: term_major }, clip: [-100.0, 100.0], obs: [ang_vel, gravity, cmd_vel, dof_pos_12, dof_vel_16, last_action] }
+  - { tensor: single_obs, clip: [-100.0, 100.0], obs: [ang_vel, gravity, cmd_vel, dof_pos_12, dof_vel_16, last_action] }
+outputs: { action_tensor: actions }
+action_decode:
+  scale_per_group: [0.25, 0.25, 0.25, 5.0]
+  raw_clip: [-100.0, 100.0]
+  leg_rate_limit_rad_s: 12.0
+  lower_limits: [-0.369, -2.983, 0.15700000000000003, -0.369, 0.15700000000000003, -2.983, -0.369, 0.15700000000000003, -2.826, -0.369, -2.983, -2.826, -30.0, -30.0, -30.0, -30.0]
+  upper_limits: [0.369, -0.15700000000000003, 2.983, 0.369, 2.983, -0.15700000000000003, 0.369, 2.983, 2.826, 0.369, -0.15700000000000003, 2.826, 30.0, 30.0, 30.0, 30.0]
+gains:
+  kp: { hip: 90.0, thigh: 120.0, calf: 120.0 }
+  kd: { hip: 7.0, thigh: 12.0, calf: 12.0, wheel: 1.0 }

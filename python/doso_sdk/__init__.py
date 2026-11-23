@@ -2,6 +2,7 @@
 
 from .client import (
     BodyControlStatus,
+    BodyHeightStatus,
     Capabilities,
     ControllerSnapshot,
     DosoClient,
@@ -13,14 +14,23 @@ from .client import (
     MotorInfo,
     NavigationClient,
     ObservationsClient,
+    RecoveryActionReply,
+    RecoveryStatus,
     RobotClient,
     SportClient,
     TelemetryStream,
     TeleopSession,
+    VoiceChatReply,
+    VoiceClient,
+    VoicePlayback,
+    VoiceProfileInfo,
+    VoiceProfileList,
+    VoiceStatus,
 )
 
 __all__ = [
     "BodyControlStatus",
+    "BodyHeightStatus",
     "Capabilities",
     "ControllerSnapshot",
     "DosoClient",
@@ -32,8 +42,16 @@ __all__ = [
     "MotorInfo",
     "NavigationClient",
     "ObservationsClient",
+    "RecoveryActionReply",
+    "RecoveryStatus",
     "RobotClient",
     "SportClient",
     "TelemetryStream",
     "TeleopSession",
+    "VoiceChatReply",
+    "VoiceClient",
+    "VoicePlayback",
+    "VoiceProfileInfo",
+    "VoiceProfileList",
+    "VoiceStatus",
 ]

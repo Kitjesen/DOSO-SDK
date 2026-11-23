@@ -1,0 +1,90 @@
+{
+  "name": "single_frame_height_v2",
+  "description": "Thunder V4 V2 single-frame body-height policy (58-D, RS04 legs + RS02 wheels)",
+  "modelPath": "model/single_frame_height_v2_policy.onnx",
+  "inputName": "obs",
+  "_historySize": 1,
+  "_onnxSha256": "318bff03d1b765f30553bf5aea85a2b413f58a8a2078eae830a097e6475dffb5",
+  "observationType": "singleFrameHeight",
+  "bodyHeightCommand": 0.375,
+  "minBodyHeightCommand": 0.25,
+  "maxBodyHeightCommand": 0.50,
+  "bodyHeightRateLimit": 0.05,
+  "velocityCommandMin": [-0.5, -0.3, -0.3],
+  "velocityCommandMax": [0.5, 0.3, 0.3],
+  "standingPose": [
+    -0.1, -0.8, 1.8,
+     0.1,  0.8, -1.8,
+     0.1,  0.8, -1.8,
+    -0.1, -0.8, 1.8,
+     0.0,  0.0, 0.0, 0.0
+  ],
+  "standUpPose": [
+    -0.1, -0.8, 1.8,
+     0.1,  0.8, -1.8,
+     0.1,  0.8, -1.8,
+    -0.1, -0.8, 1.8,
+     0.0,  0.0, 0.0, 0.0
+  ],
+  "policyDefaultPose": [
+    -0.1, -0.8, 1.8,
+     0.1,  0.8, -1.8,
+     0.1,  0.8, -1.8,
+    -0.1, -0.8, 1.8,
+     0.0,  0.0, 0.0, 0.0
+  ],
+  "sittingPose": [
+    0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0
+  ],
+  "standUpCounts": 150,
+  "sitDownCounts": 150,
+  "inferKp": [
+    100, 100, 100,
+    100, 100, 100,
+    100, 100, 100,
+    100, 100, 100,
+    0, 0, 0, 0
+  ],
+  "inferKd": [
+    5, 5, 5,
+    5, 5, 5,
+    5, 5, 5,
+    5, 5, 5,
+    1, 1, 1, 1
+  ],
+  "standUpKp": [
+    200, 200, 200,
+    200, 200, 200,
+    200, 200, 200,
+    200, 200, 200,
+    0, 0, 0, 0
+  ],
+  "standUpKd": [
+    8, 8, 8,
+    8, 8, 8,
+    8, 8, 8,
+    8, 8, 8,
+    1, 1, 1, 1
+  ],
+  "sitDownKp": [
+    200, 200, 200,
+    200, 200, 200,
+    200, 200, 200,
+    200, 200, 200,
+    0, 0, 0, 0
+  ],
+  "sitDownKd": [
+    8, 8, 8,
+    8, 8, 8,
+    8, 8, 8,
+    8, 8, 8,
+    1, 1, 1, 1
+  ],
+  "imuGyroscopeScale": 0.25,
+  "jointVelocityScale": [0.05, 0.05, 0.05, 0.05],
+  "actionScale": [0.125, 0.25, 0.25, 5.0]
+}

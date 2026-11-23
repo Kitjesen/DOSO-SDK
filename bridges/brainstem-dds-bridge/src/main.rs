@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{ArgAction, Parser};
 
-use brainstem_dds_bridge::{serve_base_gateway, BaseGatewayConfig};
+use brainstem_dds_bridge::{serve_base_gateway, AskMeVoiceConfig, BaseGatewayConfig};
 #[cfg(has_cyclonedds)]
 use brainstem_dds_bridge::{BridgeConfig, BridgeRuntime};
 
@@ -94,6 +94,22 @@ struct Args {
 
     #[arg(long, env = "DOSO_SHM_POLL_HZ", default_value_t = 200.0)]
     shm_poll_hz: f64,
+
+    /// Optional onboard AskMe HTTP endpoint (e.g. http://127.0.0.1:8765) for doso.v1.Voice.
+    #[arg(long, env = "ASKME_ENDPOINT")]
+    askme_endpoint: Option<String>,
+
+    /// Operator identity header forwarded to AskMe control endpoints.
+    #[arg(long, env = "ASKME_OPERATOR_ID", default_value = "supervisor-1")]
+    askme_operator_id: String,
+
+    /// Optional bearer token forwarded to AskMe if AskMe auth is enabled.
+    #[arg(long, env = "ASKME_API_TOKEN")]
+    askme_api_token: Option<String>,
+
+    /// Target robot/device id sent to AskMe /api/voice/speak (defaults to robot_id or xiaosuan-1).
+    #[arg(long, env = "ASKME_ROBOT_ID")]
+    askme_robot_id: Option<String>,
 }
 
 fn gateway_enabled(raw: &str) -> bool {
@@ -128,6 +144,24 @@ async fn main() -> Result<()> {
     let shm_poll_period = Duration::from_secs_f64(1.0 / args.shm_poll_hz.clamp(20.0, 1000.0));
 
     if gw_enabled {
+        let askme_voice = args
+            .askme_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| {
+                !s.is_empty() && !s.eq_ignore_ascii_case("off") && !s.eq_ignore_ascii_case("none")
+            })
+            .map(|ep| AskMeVoiceConfig {
+                endpoint: ep.to_owned(),
+                operator_id: args.askme_operator_id.clone(),
+                api_token: args.askme_api_token.clone(),
+                robot_id: args
+                    .askme_robot_id
+                    .clone()
+                    .or_else(|| args.robot_id.clone())
+                    .unwrap_or_else(|| "xiaosuan-1".to_owned()),
+                timeout: Duration::from_secs(30),
+            });
         let gw_cfg = BaseGatewayConfig {
             brainstem_endpoint: args.brainstem_endpoint.clone(),
             brainstem_client_id: args.client_id.clone(),
@@ -142,11 +176,13 @@ async fn main() -> Result<()> {
             shm_proprio_name: args.shm_proprio_name.clone(),
             shm_cmd_name: args.shm_cmd_name.clone(),
             shm_poll_period,
+            askme_voice,
         };
         tracing::info!(
             listen = %gw_cfg.listen_addr,
             brainstem = %gw_cfg.brainstem_endpoint,
             shm_enabled = gw_cfg.shm_enabled,
+            voice_enabled = gw_cfg.askme_voice.is_some(),
             "starting Board-A doso.v1 Base Gateway"
         );
         handles.push(tokio::spawn(serve_base_gateway(gw_cfg, gw_stop_rx)));

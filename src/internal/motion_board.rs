@@ -67,6 +67,12 @@ pub struct MotionBoardExternalClient {
     timeout: Duration,
 }
 
+/// Client for Brainstem's explicit fall-recovery service (`brainstem.api.v1.RobotRecovery`).
+pub struct MotionBoardRecoveryClient {
+    channel: Channel,
+    timeout: Duration,
+}
+
 impl MotionBoardClient {
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
         Self::with_config(MotionBoardConfig::new(endpoint)).await
@@ -284,6 +290,25 @@ impl MotionBoardClient {
         )
     }
 
+    pub async fn body_height_status(&self) -> Result<rpc::BodyHeightStatus> {
+        read(
+            rpc::robot_control_client::RobotControlClient::new(self.channel.clone())
+                .get_body_height_status(self.request(()))
+                .await,
+        )
+    }
+
+    pub async fn set_body_height(&self, height_m: f64) -> Result<rpc::BodyHeightStatus> {
+        if !height_m.is_finite() {
+            return Err(Error::invalid("height_m must be finite"));
+        }
+        read(
+            rpc::robot_control_client::RobotControlClient::new(self.channel.clone())
+                .set_body_height(self.request(rpc::BodyHeightCommand { height_m }))
+                .await,
+        )
+    }
+
     /// Clear motor faults. An empty list asks Brainstem to clear all faults.
     pub async fn clear_motor_fault(&self, joint_ids: impl IntoIterator<Item = u32>) -> Result<()> {
         let joint_ids = joint_ids.into_iter().collect::<Vec<_>>();
@@ -336,6 +361,14 @@ impl MotionBoardClient {
     /// session before sending joint targets.
     pub fn external(&self) -> MotionBoardExternalClient {
         MotionBoardExternalClient {
+            channel: self.channel.clone(),
+            timeout: self.timeout,
+        }
+    }
+
+    /// Open the native fall-recovery service (`RobotRecovery`) on the same Brainstem channel.
+    pub fn recovery(&self) -> MotionBoardRecoveryClient {
+        MotionBoardRecoveryClient {
             channel: self.channel.clone(),
             timeout: self.timeout,
         }
@@ -450,6 +483,110 @@ impl MotionBoardExternalClient {
             )
             .control(frames)
             .await,
+        )
+    }
+
+    fn request<T>(&self, body: T) -> Request<T> {
+        let mut request = Request::new(body);
+        request.set_timeout(self.timeout);
+        request
+    }
+}
+
+impl MotionBoardRecoveryClient {
+    pub async fn status(&self) -> Result<rpc::RecoveryStatus> {
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .get_status(self.request(()))
+                .await,
+        )
+    }
+
+    pub async fn enter(&self, operation_id: impl Into<String>) -> Result<rpc::RecoveryStatus> {
+        let operation_id = operation_id.into();
+        if operation_id.trim().is_empty() {
+            return Err(Error::invalid("operation_id must not be empty"));
+        }
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .enter(self.request(rpc::RecoveryStartRequest {
+                    operation_id,
+                    session_token: String::new(),
+                }))
+                .await,
+        )
+    }
+
+    pub async fn enable(&self, session_token: impl Into<String>) -> Result<rpc::RecoveryStatus> {
+        let token = control_token(session_token.into())?;
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .enable(self.request(rpc::RecoverySessionRequest {
+                    session_token: token,
+                }))
+                .await,
+        )
+    }
+
+    pub async fn heartbeat(&self, session_token: impl Into<String>) -> Result<rpc::RecoveryStatus> {
+        let token = control_token(session_token.into())?;
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .heartbeat(self.request(rpc::RecoverySessionRequest {
+                    session_token: token,
+                }))
+                .await,
+        )
+    }
+
+    pub async fn start(
+        &self,
+        operation_id: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> Result<rpc::RecoveryActionReply> {
+        let operation_id = operation_id.into();
+        if operation_id.trim().is_empty() {
+            return Err(Error::invalid("operation_id must not be empty"));
+        }
+        let token = control_token(session_token.into())?;
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .start(self.request(rpc::RecoveryStartRequest {
+                    operation_id,
+                    session_token: token,
+                }))
+                .await,
+        )
+    }
+
+    pub async fn cancel(
+        &self,
+        operation_id: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> Result<rpc::RecoveryActionReply> {
+        let operation_id = operation_id.into();
+        if operation_id.trim().is_empty() {
+            return Err(Error::invalid("operation_id must not be empty"));
+        }
+        let token = control_token(session_token.into())?;
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .cancel(self.request(rpc::RecoveryCancelRequest {
+                    operation_id,
+                    session_token: token,
+                }))
+                .await,
+        )
+    }
+
+    pub async fn exit(&self, session_token: impl Into<String>) -> Result<rpc::RecoveryStatus> {
+        let token = control_token(session_token.into())?;
+        read(
+            rpc::robot_recovery_client::RobotRecoveryClient::new(self.channel.clone())
+                .exit(self.request(rpc::RecoverySessionRequest {
+                    session_token: token,
+                }))
+                .await,
         )
     }
 
@@ -804,6 +941,35 @@ mod tests {
             Err(tonic::Status::unimplemented("unused"))
         }
 
+        async fn set_body_height(
+            &self,
+            request: Request<rpc::BodyHeightCommand>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, tonic::Status> {
+            let height_m = request.into_inner().height_m;
+            Ok(Response::new(rpc::BodyHeightStatus {
+                supported: true,
+                current_height_m: height_m,
+                target_height_m: height_m,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
+            }))
+        }
+
+        async fn get_body_height_status(
+            &self,
+            _: Request<()>,
+        ) -> std::result::Result<Response<rpc::BodyHeightStatus>, tonic::Status> {
+            Ok(Response::new(rpc::BodyHeightStatus {
+                supported: true,
+                current_height_m: 0.375,
+                target_height_m: 0.375,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
+            }))
+        }
+
         async fn get_profile(
             &self,
             _: Request<()>,
@@ -819,6 +985,7 @@ mod tests {
                     availability: rpc::RobotModeAvailability::Available as i32,
                     profile_id: "flat_w5".into(),
                     unavailable_reason: String::new(),
+                    body_height: None,
                 }],
                 active_mode_id: "flat".into(),
             }))

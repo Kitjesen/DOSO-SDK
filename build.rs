@@ -15,7 +15,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     protos.sort();
-    tonic_prost_build::configure().compile_protos(&protos, &["proto".into()])?;
+    tonic_prost_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&protos, &["proto".into()])?;
     println!("cargo:rerun-if-changed=proto");
 
     // Brainstem is a separate, lower-level protocol. Keep its generated
@@ -26,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "brainstem/protocol/brainstem_api/external.proto",
         "brainstem/protocol/brainstem_api/recovery.proto",
     ];
-    tonic_prost_build::configure().compile_protos(&brainstem_protos, &["brainstem/protocol"])?;
+    tonic_prost_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&brainstem_protos, &["brainstem/protocol"])?;
     println!("cargo:rerun-if-changed=brainstem/protocol");
     Ok(())
 }

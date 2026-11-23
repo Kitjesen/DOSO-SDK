@@ -22,6 +22,15 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ONNX Runtime C-API
+        run: |
+          python -m pip install --quiet onnxruntime
+          python -c "import os, pathlib, sys, onnxruntime; capi = pathlib.Path(onnxruntime.__file__).resolve().parent / 'capi'; lib = (capi / 'onnxruntime.dll') if sys.platform == 'win32' else sorted(capi.glob('libonnxruntime.so*'))[0]; assert lib.is_file(), f'missing ORT lib in {capi}'; print('ORT:', onnxruntime.__version__, lib); open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8').write(f'ONNXRUNTIME_DLL_PATH={lib}\n')"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -54,6 +63,11 @@ jobs:
 
       - name: Build C/Python FFI shared library
         run: cargo build --manifest-path ffi/Cargo.toml
+
+      - name: Test Rust Brainstem runtime (all crates + 4-model ONNX Golden + Hot-Deploy E2E)
+        run: |
+          cargo clippy --manifest-path runtime/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path runtime/Cargo.toml
 
       - name: Verify crate package
         run: cargo package -p doso-sdk --allow-dirty --locked

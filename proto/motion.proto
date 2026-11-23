@@ -18,6 +18,15 @@ service Motion {
   rpc PlayGesture(PlayGestureRequest) returns (Receipt);
   rpc Profile(Empty) returns (ProfileInfo);
   rpc SwitchProfile(SwitchProfileRequest) returns (Receipt);
+  rpc BodyHeightStatus(Empty) returns (.doso.v1.BodyHeightStatus);
+  rpc SetBodyHeight(SetBodyHeightRequest) returns (.doso.v1.BodyHeightStatus);
+  rpc RecoveryStatus(Empty) returns (.doso.v1.RecoveryStatus);
+  rpc RecoveryEnter(RecoveryStartRequest) returns (.doso.v1.RecoveryStatus);
+  rpc RecoveryEnable(RecoverySessionRequest) returns (.doso.v1.RecoveryStatus);
+  rpc RecoveryHeartbeat(RecoverySessionRequest) returns (.doso.v1.RecoveryStatus);
+  rpc RecoveryStart(RecoveryStartRequest) returns (RecoveryActionReply);
+  rpc RecoveryCancel(RecoveryCancelRequest) returns (RecoveryActionReply);
+  rpc RecoveryExit(RecoverySessionRequest) returns (.doso.v1.RecoveryStatus);
   rpc Stop(Command) returns (Receipt);
   rpc StopMotion(Command) returns (Receipt);
   rpc ClearEmergencyStop(Command) returns (Receipt);

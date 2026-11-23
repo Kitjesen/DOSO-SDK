@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ class _CCapabilities(ctypes.Structure):
         ("localization", ctypes.c_uint8),
         ("tasks", ctypes.c_uint8),
         ("board_b_autonomy", ctypes.c_uint8),
+        ("voice", ctypes.c_uint8),
     ]
 
 
@@ -68,6 +70,18 @@ class _CBodyControlStatus(ctypes.Structure):
         ("last_accepted_sequence", ctypes.c_uint64),
         ("accepted_count", ctypes.c_uint64),
         ("rejected_count", ctypes.c_uint64),
+    ]
+
+
+class _CBodyHeightStatus(ctypes.Structure):
+    _fields_ = [
+        ("supported", ctypes.c_uint8),
+        ("_pad", ctypes.c_uint8 * 7),
+        ("current_height_m", ctypes.c_double),
+        ("target_height_m", ctypes.c_double),
+        ("min_height_m", ctypes.c_double),
+        ("max_height_m", ctypes.c_double),
+        ("rate_mps", ctypes.c_double),
     ]
 
 
@@ -168,6 +182,55 @@ class Capabilities:
     localization: bool
     tasks: bool
     board_b_autonomy: bool
+    voice: bool = False
+
+
+@dataclass(frozen=True)
+class VoiceStatus:
+    status: str
+    service: str
+    active_profile: str
+    llm_provider: str
+    llm_model: str
+    asr_provider: str
+    tts_provider: str
+
+
+@dataclass(frozen=True)
+class VoiceProfileInfo:
+    profile_id: str
+    label: str
+    voice_id: str
+    category: str
+    speed: float
+    volume: float
+    pitch: float
+    emotion: str
+
+
+@dataclass(frozen=True)
+class VoiceProfileList:
+    active_profile: str
+    profiles: Tuple[VoiceProfileInfo, ...]
+    sound_cues_enabled: bool
+    available_sound_cues: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class VoicePlayback:
+    playback_id: str
+    state: str
+    priority: str
+    text_chars: int
+    message: str
+
+
+@dataclass(frozen=True)
+class VoiceChatReply:
+    reply_text: str
+    thread_id: str
+    turn_id: str
+    latency_ms: float
 
 
 @dataclass(frozen=True)
@@ -183,6 +246,35 @@ class BodyControlStatus:
     last_accepted_sequence: int
     accepted_count: int
     rejected_count: int
+
+
+@dataclass(frozen=True)
+class BodyHeightStatus:
+    supported: bool
+    current_height_m: float
+    target_height_m: float
+    min_height_m: float
+    max_height_m: float
+    rate_mps: float
+
+
+@dataclass(frozen=True)
+class RecoveryStatus:
+    availability: int
+    phase: int
+    operation_id: str
+    unavailable_reason: str
+    selected: bool
+    session_token: str
+    motor_disable_confirmed: bool
+
+
+@dataclass(frozen=True)
+class RecoveryActionReply:
+    operation_id: str
+    decision: int
+    phase: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -347,6 +439,47 @@ def _lib() -> ctypes.CDLL:
     ]
     lib.doso_sport_control_status.restype = ctypes.c_int32
 
+    lib.doso_sport_body_height_status.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_CBodyHeightStatus),
+    ]
+    lib.doso_sport_body_height_status.restype = ctypes.c_int32
+    lib.doso_sport_set_body_height.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_double,
+        ctypes.POINTER(_CBodyHeightStatus),
+    ]
+    lib.doso_sport_set_body_height.restype = ctypes.c_int32
+
+    lib.doso_sport_recovery_status_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.doso_sport_recovery_status_json.restype = ctypes.c_int32
+    for fn_name in (
+        "doso_sport_recovery_enter_json",
+        "doso_sport_recovery_enable_json",
+        "doso_sport_recovery_heartbeat_json",
+        "doso_sport_recovery_exit_json",
+    ):
+        fn = getattr(lib, fn_name)
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+        fn.restype = ctypes.c_int32
+    for fn_name in (
+        "doso_sport_recovery_start_json",
+        "doso_sport_recovery_cancel_json",
+    ):
+        fn = getattr(lib, fn_name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        fn.restype = ctypes.c_int32
+
     for fn_name in (
         "doso_sport_current_profile",
         "doso_sport_list_profiles",
@@ -399,6 +532,51 @@ def _lib() -> ctypes.CDLL:
     lib.doso_nav_go_to.restype = ctypes.c_int32
     lib.doso_nav_cancel.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
     lib.doso_nav_cancel.restype = ctypes.c_int32
+
+    lib.doso_voice_status_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    lib.doso_voice_status_json.restype = ctypes.c_int32
+    lib.doso_voice_profiles_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    lib.doso_voice_profiles_json.restype = ctypes.c_int32
+    lib.doso_voice_switch_profile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.doso_voice_switch_profile.restype = ctypes.c_int32
+    lib.doso_voice_speak.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.doso_voice_speak.restype = ctypes.c_int32
+    lib.doso_voice_playback_status_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.doso_voice_playback_status_json.restype = ctypes.c_int32
+    lib.doso_voice_cancel_playback.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+    lib.doso_voice_cancel_playback.restype = ctypes.c_int32
+    lib.doso_voice_switch_component.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_uint8,
+    ]
+    lib.doso_voice_switch_component.restype = ctypes.c_int32
+    lib.doso_voice_update_prompt.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.doso_voice_update_prompt.restype = ctypes.c_int32
+    lib.doso_voice_chat_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_uint8,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.doso_voice_chat_json.restype = ctypes.c_int32
 
     _LIB = lib
     return lib
@@ -689,6 +867,128 @@ class SportClient:
         raw = buf.value.decode("utf-8", errors="replace")
         return [line for line in raw.splitlines() if line]
 
+    def body_height_status(self) -> BodyHeightStatus:
+        raw = _CBodyHeightStatus()
+        _check(_lib().doso_sport_body_height_status(self._robot, ctypes.byref(raw)))
+        return BodyHeightStatus(
+            supported=bool(raw.supported),
+            current_height_m=raw.current_height_m,
+            target_height_m=raw.target_height_m,
+            min_height_m=raw.min_height_m,
+            max_height_m=raw.max_height_m,
+            rate_mps=raw.rate_mps,
+        )
+
+    def set_body_height(self, height_m: float) -> BodyHeightStatus:
+        raw = _CBodyHeightStatus()
+        _check(
+            _lib().doso_sport_set_body_height(
+                self._robot, float(height_m), ctypes.byref(raw)
+            )
+        )
+        return BodyHeightStatus(
+            supported=bool(raw.supported),
+            current_height_m=raw.current_height_m,
+            target_height_m=raw.target_height_m,
+            min_height_m=raw.min_height_m,
+            max_height_m=raw.max_height_m,
+            rate_mps=raw.rate_mps,
+        )
+
+    @staticmethod
+    def _parse_recovery_status(raw_json: str) -> RecoveryStatus:
+        d = json.loads(raw_json)
+        return RecoveryStatus(
+            availability=int(d.get("availability", 0)),
+            phase=int(d.get("phase", 0)),
+            operation_id=str(d.get("operation_id", "")),
+            unavailable_reason=str(d.get("unavailable_reason", "")),
+            selected=bool(d.get("selected", False)),
+            session_token=str(d.get("session_token", "")),
+            motor_disable_confirmed=bool(d.get("motor_disable_confirmed", False)),
+        )
+
+    @staticmethod
+    def _parse_recovery_action(raw_json: str) -> RecoveryActionReply:
+        d = json.loads(raw_json)
+        return RecoveryActionReply(
+            operation_id=str(d.get("operation_id", "")),
+            decision=int(d.get("decision", 0)),
+            phase=int(d.get("phase", 0)),
+            reason=str(d.get("reason", "")),
+        )
+
+    def recovery_status(self) -> RecoveryStatus:
+        buf = ctypes.create_string_buffer(2048)
+        _check(_lib().doso_sport_recovery_status_json(self._robot, buf, len(buf)))
+        return self._parse_recovery_status(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_enter(self, operation_id: str) -> RecoveryStatus:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_enter_json(
+                self._robot, operation_id.encode("utf-8"), buf, len(buf)
+            )
+        )
+        return self._parse_recovery_status(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_enable(self, session_token: str) -> RecoveryStatus:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_enable_json(
+                self._robot, session_token.encode("utf-8"), buf, len(buf)
+            )
+        )
+        return self._parse_recovery_status(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_heartbeat(self, session_token: str) -> RecoveryStatus:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_heartbeat_json(
+                self._robot, session_token.encode("utf-8"), buf, len(buf)
+            )
+        )
+        return self._parse_recovery_status(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_start(
+        self, operation_id: str, session_token: str
+    ) -> RecoveryActionReply:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_start_json(
+                self._robot,
+                operation_id.encode("utf-8"),
+                session_token.encode("utf-8"),
+                buf,
+                len(buf),
+            )
+        )
+        return self._parse_recovery_action(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_cancel(
+        self, operation_id: str, session_token: str
+    ) -> RecoveryActionReply:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_cancel_json(
+                self._robot,
+                operation_id.encode("utf-8"),
+                session_token.encode("utf-8"),
+                buf,
+                len(buf),
+            )
+        )
+        return self._parse_recovery_action(buf.value.decode("utf-8", errors="replace"))
+
+    def recovery_exit(self, session_token: str) -> RecoveryStatus:
+        buf = ctypes.create_string_buffer(2048)
+        _check(
+            _lib().doso_sport_recovery_exit_json(
+                self._robot, session_token.encode("utf-8"), buf, len(buf)
+            )
+        )
+        return self._parse_recovery_status(buf.value.decode("utf-8", errors="replace"))
+
     def take_control(self) -> TeleopSession:
         handle = _lib().doso_teleop_take_control(self._robot)
         if not handle:
@@ -710,6 +1010,150 @@ class NavigationClient:
             _lib().doso_nav_cancel(
                 self._robot, task_id.encode("utf-8"), reason.encode("utf-8")
             )
+        )
+
+
+class VoiceClient:
+    """Unified voice runtime & dialogue management client (`doso.v1.Voice`)."""
+
+    def __init__(self, robot_handle: int) -> None:
+        self._robot = robot_handle
+
+    def status(self) -> VoiceStatus:
+        buf = ctypes.create_string_buffer(8192)
+        _check(_lib().doso_voice_status_json(self._robot, buf, len(buf)))
+        data = json.loads(buf.value.decode("utf-8", errors="replace"))
+        return VoiceStatus(
+            status=str(data.get("status", "")),
+            service=str(data.get("service", "")),
+            active_profile=str(data.get("active_profile", "")),
+            llm_provider=str(data.get("llm_provider", "")),
+            llm_model=str(data.get("llm_model", "")),
+            asr_provider=str(data.get("asr_provider", "")),
+            tts_provider=str(data.get("tts_provider", "")),
+        )
+
+    def list_profiles(self) -> VoiceProfileList:
+        buf = ctypes.create_string_buffer(16384)
+        _check(_lib().doso_voice_profiles_json(self._robot, buf, len(buf)))
+        data = json.loads(buf.value.decode("utf-8", errors="replace"))
+        profiles = tuple(
+            VoiceProfileInfo(
+                profile_id=str(p.get("profile_id", "")),
+                label=str(p.get("label", "")),
+                voice_id=str(p.get("voice_id", "")),
+                category=str(p.get("category", "")),
+                speed=float(p.get("speed", 1.0)),
+                volume=float(p.get("volume", 1.0)),
+                pitch=float(p.get("pitch", 0.0)),
+                emotion=str(p.get("emotion", "")),
+            )
+            for p in data.get("profiles", [])
+        )
+        cues = tuple(str(c) for c in data.get("available_sound_cues", []))
+        return VoiceProfileList(
+            active_profile=str(data.get("active_profile", "")),
+            profiles=profiles,
+            sound_cues_enabled=bool(data.get("sound_cues_enabled", False)),
+            available_sound_cues=cues,
+        )
+
+    def switch_profile(self, profile_id: str) -> None:
+        _check(_lib().doso_voice_switch_profile(self._robot, profile_id.encode("utf-8")))
+
+    def speak(
+        self,
+        text: str,
+        *,
+        priority: str = "normal",
+        queue_policy: str = "enqueue",
+        voice_profile_id: Optional[str] = None,
+    ) -> str:
+        pb_buf = ctypes.create_string_buffer(128)
+        prof_bytes = voice_profile_id.encode("utf-8") if voice_profile_id else None
+        _check(
+            _lib().doso_voice_speak(
+                self._robot,
+                text.encode("utf-8"),
+                priority.encode("utf-8"),
+                queue_policy.encode("utf-8"),
+                prof_bytes,
+                pb_buf,
+                len(pb_buf),
+            )
+        )
+        return pb_buf.value.decode("utf-8", errors="replace")
+
+    def playback_status(self, playback_id: str) -> VoicePlayback:
+        buf = ctypes.create_string_buffer(4096)
+        _check(
+            _lib().doso_voice_playback_status_json(
+                self._robot, playback_id.encode("utf-8"), buf, len(buf)
+            )
+        )
+        data = json.loads(buf.value.decode("utf-8", errors="replace"))
+        return VoicePlayback(
+            playback_id=str(data.get("playback_id", playback_id)),
+            state=str(data.get("state", "")),
+            priority=str(data.get("priority", "")),
+            text_chars=int(data.get("text_chars", 0)),
+            message=str(data.get("message", "")),
+        )
+
+    def cancel_playback(self, playback_id: str, reason: str = "operator_cancelled") -> None:
+        _check(
+            _lib().doso_voice_cancel_playback(
+                self._robot, playback_id.encode("utf-8"), reason.encode("utf-8")
+            )
+        )
+
+    def switch_component(
+        self,
+        component: str,
+        provider: str,
+        model: Optional[str] = None,
+        *,
+        validate: bool = False,
+    ) -> None:
+        model_bytes = model.encode("utf-8") if model else None
+        _check(
+            _lib().doso_voice_switch_component(
+                self._robot,
+                component.encode("utf-8"),
+                provider.encode("utf-8"),
+                model_bytes,
+                1 if validate else 0,
+            )
+        )
+
+    def update_prompt(self, system_prompt: str) -> None:
+        _check(_lib().doso_voice_update_prompt(self._robot, system_prompt.encode("utf-8")))
+
+    def chat(
+        self,
+        text: str,
+        *,
+        thread_id: Optional[str] = None,
+        speak_reply: bool = False,
+    ) -> VoiceChatReply:
+        buf = ctypes.create_string_buffer(16384)
+        tid_bytes = thread_id.encode("utf-8") if thread_id else None
+        _check(
+            _lib().doso_voice_chat_json(
+                self._robot,
+                text.encode("utf-8"),
+                tid_bytes,
+                1 if speak_reply else 0,
+                buf,
+                len(buf),
+            )
+        )
+        data = json.loads(buf.value.decode("utf-8", errors="replace"))
+        return VoiceChatReply(
+            reply_text=str(data.get("reply_text", "")),
+            thread_id=str(data.get("thread_id", "")),
+            turn_id=str(data.get("turn_id", "")),
+            latency_ms=float(data.get("latency_ms", 0.0)),
         )
 
 
@@ -774,6 +1218,7 @@ class RobotClient:
             localization=bool(raw.localization),
             tasks=bool(raw.tasks),
             board_b_autonomy=bool(raw.board_b_autonomy),
+            voice=bool(raw.voice),
         )
 
     def sport(self) -> SportClient:
@@ -787,6 +1232,9 @@ class RobotClient:
 
     def navigation(self) -> NavigationClient:
         return NavigationClient(self._handle)
+
+    def voice(self) -> VoiceClient:
+        return VoiceClient(self._handle)
 
     def low_level(self) -> LowLevelSession:
         handle = _lib().doso_low_level_enter(self._handle)

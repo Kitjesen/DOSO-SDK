@@ -19,6 +19,8 @@ use tonic::{Request, Response, Status};
 
 const BOARD_B_MISSING_MSG: &str =
     "Board B autonomy (LingTu) is not installed on standalone motion chassis";
+const VOICE_UNCONFIGURED_MSG: &str =
+    "Voice runtime (AskMe) is not configured on this gateway (set ASKME_ENDPOINT, e.g. http://127.0.0.1:8765)";
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send>>;
 
@@ -37,6 +39,7 @@ pub struct BaseGatewayConfig {
     pub shm_proprio_name: String,
     pub shm_cmd_name: String,
     pub shm_poll_period: Duration,
+    pub askme_voice: Option<crate::voice_proxy::AskMeVoiceConfig>,
 }
 
 impl Default for BaseGatewayConfig {
@@ -55,6 +58,7 @@ impl Default for BaseGatewayConfig {
             shm_proprio_name: "/doso_proprio_v1".to_string(),
             shm_cmd_name: "/doso_ext_cmd_v1".to_string(),
             shm_poll_period: Duration::from_millis(5),
+            askme_voice: None,
         }
     }
 }
@@ -148,7 +152,8 @@ pub async fn spawn_base_gateway_on_listener(
         .add_service(doso::navigation_server::NavigationServer::new(
             service.clone(),
         ))
-        .add_service(doso::tasks_server::TasksServer::new(service));
+        .add_service(doso::tasks_server::TasksServer::new(service.clone()))
+        .add_service(doso::voice_server::VoiceServer::new(service));
 
     let handle = tokio::spawn(async move {
         router
@@ -655,6 +660,10 @@ impl doso::system_server::System for BaseGatewayService {
             ("maps", sval(Kind::BoolValue(false))),
             ("navigation", sval(Kind::BoolValue(false))),
             ("tasks", sval(Kind::BoolValue(false))),
+            (
+                "voice",
+                sval(Kind::BoolValue(self.config.askme_voice.is_some())),
+            ),
         ])))
     }
 
@@ -1365,6 +1374,225 @@ impl doso::motion_server::Motion for BaseGatewayService {
         let mb = self.client().await?;
         mb.switch_profile(req.name).await.map_err(map_sdk_err)?;
         Ok(Response::new(Self::receipt(req_id, "profile_switched")))
+    }
+
+    async fn body_height_status(
+        &self,
+        request: Request<doso::Empty>,
+    ) -> std::result::Result<Response<doso::BodyHeightStatus>, Status> {
+        self.check_auth(&request)?;
+        let mb = self.client().await?;
+        let st = mb.body_height_status().await.map_err(map_sdk_err)?;
+        Ok(Response::new(doso::BodyHeightStatus {
+            supported: st.supported,
+            current_height_m: st.current_height_m,
+            target_height_m: st.target_height_m,
+            min_height_m: st.min_height_m,
+            max_height_m: st.max_height_m,
+            rate_mps: st.rate_mps,
+        }))
+    }
+
+    async fn set_body_height(
+        &self,
+        request: Request<doso::SetBodyHeightRequest>,
+    ) -> std::result::Result<Response<doso::BodyHeightStatus>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        if !req.height_m.is_finite() {
+            return Err(Status::invalid_argument("height_m must be finite"));
+        }
+        let mb = self.client().await?;
+        let st = mb
+            .set_body_height(req.height_m)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::BodyHeightStatus {
+            supported: st.supported,
+            current_height_m: st.current_height_m,
+            target_height_m: st.target_height_m,
+            min_height_m: st.min_height_m,
+            max_height_m: st.max_height_m,
+            rate_mps: st.rate_mps,
+        }))
+    }
+
+    async fn recovery_status(
+        &self,
+        request: Request<doso::Empty>,
+    ) -> std::result::Result<Response<doso::RecoveryStatus>, Status> {
+        self.check_auth(&request)?;
+        let mb = self.client().await?;
+        let st = mb.recovery().status().await.map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryStatus {
+            availability: st.availability,
+            phase: st.phase,
+            operation_id: st.operation_id,
+            unavailable_reason: st.unavailable_reason,
+            selected: st.selected,
+            session_token: st.session_token,
+            motor_disable_confirmed: st.motor_disable_confirmed,
+        }))
+    }
+
+    async fn recovery_enter(
+        &self,
+        request: Request<doso::RecoveryStartRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryStatus>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let st = mb
+            .recovery()
+            .enter(req.operation_id)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryStatus {
+            availability: st.availability,
+            phase: st.phase,
+            operation_id: st.operation_id,
+            unavailable_reason: st.unavailable_reason,
+            selected: st.selected,
+            session_token: st.session_token,
+            motor_disable_confirmed: st.motor_disable_confirmed,
+        }))
+    }
+
+    async fn recovery_enable(
+        &self,
+        request: Request<doso::RecoverySessionRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryStatus>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let st = mb
+            .recovery()
+            .enable(req.session_token)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryStatus {
+            availability: st.availability,
+            phase: st.phase,
+            operation_id: st.operation_id,
+            unavailable_reason: st.unavailable_reason,
+            selected: st.selected,
+            session_token: st.session_token,
+            motor_disable_confirmed: st.motor_disable_confirmed,
+        }))
+    }
+
+    async fn recovery_heartbeat(
+        &self,
+        request: Request<doso::RecoverySessionRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryStatus>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let st = mb
+            .recovery()
+            .heartbeat(req.session_token)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryStatus {
+            availability: st.availability,
+            phase: st.phase,
+            operation_id: st.operation_id,
+            unavailable_reason: st.unavailable_reason,
+            selected: st.selected,
+            session_token: st.session_token,
+            motor_disable_confirmed: st.motor_disable_confirmed,
+        }))
+    }
+
+    async fn recovery_start(
+        &self,
+        request: Request<doso::RecoveryStartRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryActionReply>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let r = mb
+            .recovery()
+            .start(req.operation_id, req.session_token)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryActionReply {
+            operation_id: r.operation_id,
+            decision: r.decision,
+            phase: r.phase,
+            reason: r.reason,
+        }))
+    }
+
+    async fn recovery_cancel(
+        &self,
+        request: Request<doso::RecoveryCancelRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryActionReply>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let r = mb
+            .recovery()
+            .cancel(req.operation_id, req.session_token)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryActionReply {
+            operation_id: r.operation_id,
+            decision: r.decision,
+            phase: r.phase,
+            reason: r.reason,
+        }))
+    }
+
+    async fn recovery_exit(
+        &self,
+        request: Request<doso::RecoverySessionRequest>,
+    ) -> std::result::Result<Response<doso::RecoveryStatus>, Status> {
+        self.check_auth(&request)?;
+        let req = request.into_inner();
+        let cmd = req
+            .command
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(&cmd)?;
+        let mb = self.client().await?;
+        let st = mb
+            .recovery()
+            .exit(req.session_token)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(Response::new(doso::RecoveryStatus {
+            availability: st.availability,
+            phase: st.phase,
+            operation_id: st.operation_id,
+            unavailable_reason: st.unavailable_reason,
+            selected: st.selected,
+            session_token: st.session_token,
+            motor_disable_confirmed: st.motor_disable_confirmed,
+        }))
     }
 
     async fn stop(
@@ -2169,6 +2397,176 @@ impl doso::tasks_server::Tasks for BaseGatewayService {
     }
 }
 
+impl BaseGatewayService {
+    fn require_voice(&self) -> std::result::Result<&crate::voice_proxy::AskMeVoiceConfig, Status> {
+        self.config
+            .askme_voice
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented(VOICE_UNCONFIGURED_MSG))
+    }
+}
+
+#[tonic::async_trait]
+impl doso::voice_server::Voice for BaseGatewayService {
+    async fn status(
+        &self,
+        request: Request<doso::Empty>,
+    ) -> std::result::Result<Response<doso::VoiceSystemStatus>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        Ok(Response::new(crate::voice_proxy::voice_status(cfg).await?))
+    }
+
+    async fn list_profiles(
+        &self,
+        request: Request<doso::Empty>,
+    ) -> std::result::Result<Response<doso::VoiceProfileList>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        Ok(Response::new(
+            crate::voice_proxy::voice_list_profiles(cfg).await?,
+        ))
+    }
+
+    async fn switch_profile(
+        &self,
+        request: Request<doso::VoiceSwitchProfileRequest>,
+    ) -> std::result::Result<Response<doso::Receipt>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let req_id = Self::require_command(cmd)?;
+        if body.profile_id.trim().is_empty() {
+            return Err(Status::invalid_argument("profile_id must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_switch_profile(cfg, req_id, body.profile_id.trim()).await?,
+        ))
+    }
+
+    async fn speak(
+        &self,
+        request: Request<doso::VoiceSpeakRequest>,
+    ) -> std::result::Result<Response<doso::VoicePlayback>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let req_id = Self::require_command(cmd)?;
+        if body.text.trim().is_empty() {
+            return Err(Status::invalid_argument("text must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_speak(cfg, req_id, &body).await?,
+        ))
+    }
+
+    async fn playback_status(
+        &self,
+        request: Request<doso::VoicePlaybackQuery>,
+    ) -> std::result::Result<Response<doso::VoicePlayback>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let id = request.into_inner().playback_id;
+        if id.trim().is_empty() {
+            return Err(Status::invalid_argument("playback_id must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_playback_status(cfg, id.trim()).await?,
+        ))
+    }
+
+    async fn cancel_playback(
+        &self,
+        request: Request<doso::VoicePlaybackCancelRequest>,
+    ) -> std::result::Result<Response<doso::VoicePlayback>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(cmd)?;
+        if body.playback_id.trim().is_empty() {
+            return Err(Status::invalid_argument("playback_id must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_cancel_playback(cfg, body.playback_id.trim(), &body.reason)
+                .await?,
+        ))
+    }
+
+    async fn switch_component(
+        &self,
+        request: Request<doso::VoiceSwitchComponentRequest>,
+    ) -> std::result::Result<Response<doso::Receipt>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let req_id = Self::require_command(cmd)?;
+        if body.component.trim().is_empty() || body.provider.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "component and provider must not be empty",
+            ));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_switch_component(cfg, req_id, &body).await?,
+        ))
+    }
+
+    async fn update_prompt(
+        &self,
+        request: Request<doso::VoiceUpdatePromptRequest>,
+    ) -> std::result::Result<Response<doso::Receipt>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let req_id = Self::require_command(cmd)?;
+        if body.system_prompt.trim().is_empty() {
+            return Err(Status::invalid_argument("system_prompt must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_update_prompt(cfg, req_id, &body.system_prompt).await?,
+        ))
+    }
+
+    async fn chat(
+        &self,
+        request: Request<doso::VoiceChatRequest>,
+    ) -> std::result::Result<Response<doso::VoiceChatReply>, Status> {
+        self.check_auth(&request)?;
+        let cfg = self.require_voice()?;
+        let body = request.into_inner();
+        let cmd = body
+            .command
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let _ = Self::require_command(cmd)?;
+        if body.text.trim().is_empty() {
+            return Err(Status::invalid_argument("text must not be empty"));
+        }
+        Ok(Response::new(
+            crate::voice_proxy::voice_chat(cfg, &body).await?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2464,6 +2862,39 @@ mod tests {
                 current_description: "Flat".into(),
                 mode_capabilities: Vec::new(),
                 active_mode_id: "flat".into(),
+            }))
+        }
+
+        async fn set_body_height(
+            &self,
+            request: Request<mb::BodyHeightCommand>,
+        ) -> std::result::Result<Response<mb::BodyHeightStatus>, Status> {
+            let height_m = request.into_inner().height_m;
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("set_body_height:{height_m:.3}"));
+            Ok(Response::new(mb::BodyHeightStatus {
+                supported: true,
+                current_height_m: height_m,
+                target_height_m: height_m,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
+            }))
+        }
+
+        async fn get_body_height_status(
+            &self,
+            _: Request<()>,
+        ) -> std::result::Result<Response<mb::BodyHeightStatus>, Status> {
+            Ok(Response::new(mb::BodyHeightStatus {
+                supported: true,
+                current_height_m: 0.375,
+                target_height_m: 0.375,
+                min_height_m: 0.25,
+                max_height_m: 0.50,
+                rate_mps: 0.05,
             }))
         }
 

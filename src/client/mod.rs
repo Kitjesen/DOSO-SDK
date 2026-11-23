@@ -1,6 +1,6 @@
 use crate::{
     common::text, new_request_id, rpc, CommandReceipt, Error, ErrorKind, Localization, Maps,
-    Motion, Navigation, Observations, Result, System, SystemInfo, Tasks,
+    Motion, Navigation, Observations, Result, System, SystemInfo, Tasks, Voice,
 };
 use std::time::Duration;
 use tonic::{
@@ -213,6 +213,10 @@ impl RobotClient {
     }
     pub fn tasks(&self) -> Tasks<'_> {
         Tasks(self)
+    }
+    /// Unified voice runtime & dialogue management (`doso.v1.Voice`, proxied to AskMe).
+    pub fn voice(&self) -> Voice<'_> {
+        Voice(self)
     }
 
     pub(crate) fn request<T>(&self, body: T) -> Request<T> {

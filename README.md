@@ -4,7 +4,7 @@ DOSO SDK **0.3.0** 统一面向外部开发者与上层系统，对外主入口�
 
 无论机器狗采用哪种出厂形态，客户业务代码与多语言封装（Rust / C++17 / Python / Android）**永远只连这一个 `RobotClient :5052`**，无需接触板 A 内部端口 `:13145`（`:13145` 已收口为机内私有接口 `doso_sdk::internal::motion_board::MotionBoardClient`）：
 
-- **纯运控底盘（仅板 A，未安装板 B `LingTu`）**：由板 A 侧 [brainstem-dds-bridge](bridges/brainstem-dds-bridge/src/base_gateway.rs) 提供轻量 `:5052 doso.v1` Base Gateway，完整支持 **L1 200Hz `low_level()` 外控** 与 **L2 `sport()` / `teleop()` / `observations()`**，并在 `system().capabilities()` 中明确标示无板 B 自主导航能力（调用 `maps()` / `navigation()` / `localization()` / `tasks()` 返回 `UNIMPLEMENTED`）。
+- **纯运控底盘（仅板 A，未安装板 B `LingTu`）**：由板 A 侧 [brainstem-dds-bridge](bridges/brainstem-dds-bridge/src/base_gateway.rs) 提供轻量 `:5052 doso.v1` Base Gateway，完整支持 **L1 200Hz `low_level()` 外控**、**L2 `sport()`（含动作库 `list_gestures`/`play_gesture`、站高调节 `body_height_status`/`set_body_height`、摔倒恢复 `recovery_*`） / `teleop()` / `observations()`** 以及可选 **语音管理 `voice()`**（经 `ASKME_ENDPOINT` 代理机载 AskMe），并在 `system().capabilities()` 中明确标示无板 B 自主导航能力（调用 `maps()` / `navigation()` / `localization()` / `tasks()` 返回 `UNIMPLEMENTED`）。
 - **完整智能整机（板 A + 板 B `LingTu`）**：客户连板 B `:5052` 获得全部 **L2 本体 + L3 建图/定位/导航/巡检任务**；板间内部传感器与速度指令经 `CycloneDDS` 通信；当 `System.Handshake` 返回 `low_level_endpoint`（如板 A `:5053`）时，`robot.low_level()` 会自动旁路板 B Python 直连板 A Rust，保证低抖动控制。
 
 ```text
@@ -39,7 +39,7 @@ cargo test --workspace --locked
 ```text
 DOSO-SDK/
 ├── src/             RobotClient 对外统一客户端及内部 motion_board 隔离模块
-├── proto/           对外整机七域协议 doso.v1
+├── proto/           对外整机八域协议 doso.v1（含 Voice 语音管理与站高控制）
 ├── ffi/             C-ABI 动态库导出（含无硬件 Mock 测试服务）
 ├── cpp/             C++17 单头文件 RobotClient
 ├── python/          Python ctypes RobotClient

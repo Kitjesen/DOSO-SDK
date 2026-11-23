@@ -74,6 +74,7 @@ struct Capabilities {
   bool localization{false};
   bool tasks{false};
   bool board_b_autonomy{false};
+  bool voice{false};
 };
 
 struct BodyControlStatus {
@@ -88,6 +89,15 @@ struct BodyControlStatus {
   uint64_t last_accepted_sequence{0};
   uint64_t accepted_count{0};
   uint64_t rejected_count{0};
+};
+
+struct BodyHeightStatus {
+  bool supported{false};
+  double current_height_m{0.0};
+  double target_height_m{0.0};
+  double min_height_m{0.0};
+  double max_height_m{0.0};
+  double rate_mps{0.0};
 };
 
 struct ImuSnapshot {
@@ -156,6 +166,15 @@ class FfiApi {
   decltype(&doso_sport_current_profile) sport_current_profile{};
   decltype(&doso_sport_list_profiles) sport_list_profiles{};
   decltype(&doso_sport_list_gestures) sport_list_gestures{};
+  decltype(&doso_sport_body_height_status) sport_body_height_status{};
+  decltype(&doso_sport_set_body_height) sport_set_body_height{};
+  decltype(&doso_sport_recovery_status_json) sport_recovery_status_json{};
+  decltype(&doso_sport_recovery_enter_json) sport_recovery_enter_json{};
+  decltype(&doso_sport_recovery_enable_json) sport_recovery_enable_json{};
+  decltype(&doso_sport_recovery_heartbeat_json) sport_recovery_heartbeat_json{};
+  decltype(&doso_sport_recovery_start_json) sport_recovery_start_json{};
+  decltype(&doso_sport_recovery_cancel_json) sport_recovery_cancel_json{};
+  decltype(&doso_sport_recovery_exit_json) sport_recovery_exit_json{};
 
   decltype(&doso_observations_start_telemetry) observations_start_telemetry{};
   decltype(&doso_observations_latest_imu) observations_latest_imu{};
@@ -180,6 +199,16 @@ class FfiApi {
 
   decltype(&doso_nav_go_to) nav_go_to{};
   decltype(&doso_nav_cancel) nav_cancel{};
+
+  decltype(&doso_voice_status_json) voice_status_json{};
+  decltype(&doso_voice_profiles_json) voice_profiles_json{};
+  decltype(&doso_voice_switch_profile) voice_switch_profile{};
+  decltype(&doso_voice_speak) voice_speak{};
+  decltype(&doso_voice_playback_status_json) voice_playback_status_json{};
+  decltype(&doso_voice_cancel_playback) voice_cancel_playback{};
+  decltype(&doso_voice_switch_component) voice_switch_component{};
+  decltype(&doso_voice_update_prompt) voice_update_prompt{};
+  decltype(&doso_voice_chat_json) voice_chat_json{};
 
   [[noreturn]] void throw_last(const char* fallback) const {
     char buf[512]{};
@@ -290,6 +319,15 @@ class FfiApi {
     load(sport_current_profile, "doso_sport_current_profile");
     load(sport_list_profiles, "doso_sport_list_profiles");
     load(sport_list_gestures, "doso_sport_list_gestures");
+    load(sport_body_height_status, "doso_sport_body_height_status");
+    load(sport_set_body_height, "doso_sport_set_body_height");
+    load(sport_recovery_status_json, "doso_sport_recovery_status_json");
+    load(sport_recovery_enter_json, "doso_sport_recovery_enter_json");
+    load(sport_recovery_enable_json, "doso_sport_recovery_enable_json");
+    load(sport_recovery_heartbeat_json, "doso_sport_recovery_heartbeat_json");
+    load(sport_recovery_start_json, "doso_sport_recovery_start_json");
+    load(sport_recovery_cancel_json, "doso_sport_recovery_cancel_json");
+    load(sport_recovery_exit_json, "doso_sport_recovery_exit_json");
 
     load(observations_start_telemetry, "doso_observations_start_telemetry");
     load(observations_latest_imu, "doso_observations_latest_imu");
@@ -314,6 +352,16 @@ class FfiApi {
 
     load(nav_go_to, "doso_nav_go_to");
     load(nav_cancel, "doso_nav_cancel");
+
+    load(voice_status_json, "doso_voice_status_json");
+    load(voice_profiles_json, "doso_voice_profiles_json");
+    load(voice_switch_profile, "doso_voice_switch_profile");
+    load(voice_speak, "doso_voice_speak");
+    load(voice_playback_status_json, "doso_voice_playback_status_json");
+    load(voice_cancel_playback, "doso_voice_cancel_playback");
+    load(voice_switch_component, "doso_voice_switch_component");
+    load(voice_update_prompt, "doso_voice_update_prompt");
+    load(voice_chat_json, "doso_voice_chat_json");
   }
 };
 
@@ -621,6 +669,82 @@ class SportClient {
                   "list_gestures failed");
     return detail::split_lines(std::string(buf));
   }
+  BodyHeightStatus body_height_status() const {
+    DosoBodyHeightStatus raw{};
+    detail::check(detail::FfiApi::instance().sport_body_height_status(robot_, &raw),
+                  "body_height_status failed");
+    return {
+        raw.supported != 0,
+        raw.current_height_m,
+        raw.target_height_m,
+        raw.min_height_m,
+        raw.max_height_m,
+        raw.rate_mps,
+    };
+  }
+  BodyHeightStatus set_body_height(double height_m) const {
+    DosoBodyHeightStatus raw{};
+    detail::check(detail::FfiApi::instance().sport_set_body_height(robot_, height_m, &raw),
+                  "set_body_height failed");
+    return {
+        raw.supported != 0,
+        raw.current_height_m,
+        raw.target_height_m,
+        raw.min_height_m,
+        raw.max_height_m,
+        raw.rate_mps,
+    };
+  }
+  std::string recovery_status_json() const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_status_json(robot_, buf, sizeof(buf)),
+                  "recovery_status failed");
+    return std::string(buf);
+  }
+  std::string recovery_enter_json(const std::string& operation_id) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_enter_json(
+                      robot_, operation_id.c_str(), buf, sizeof(buf)),
+                  "recovery_enter failed");
+    return std::string(buf);
+  }
+  std::string recovery_enable_json(const std::string& session_token) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_enable_json(
+                      robot_, session_token.c_str(), buf, sizeof(buf)),
+                  "recovery_enable failed");
+    return std::string(buf);
+  }
+  std::string recovery_heartbeat_json(const std::string& session_token) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_heartbeat_json(
+                      robot_, session_token.c_str(), buf, sizeof(buf)),
+                  "recovery_heartbeat failed");
+    return std::string(buf);
+  }
+  std::string recovery_start_json(const std::string& operation_id,
+                                  const std::string& session_token) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_start_json(
+                      robot_, operation_id.c_str(), session_token.c_str(), buf, sizeof(buf)),
+                  "recovery_start failed");
+    return std::string(buf);
+  }
+  std::string recovery_cancel_json(const std::string& operation_id,
+                                   const std::string& session_token) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_cancel_json(
+                      robot_, operation_id.c_str(), session_token.c_str(), buf, sizeof(buf)),
+                  "recovery_cancel failed");
+    return std::string(buf);
+  }
+  std::string recovery_exit_json(const std::string& session_token) const {
+    char buf[2048]{};
+    detail::check(detail::FfiApi::instance().sport_recovery_exit_json(
+                      robot_, session_token.c_str(), buf, sizeof(buf)),
+                  "recovery_exit failed");
+    return std::string(buf);
+  }
   TeleopSession take_control() const {
     DosoTeleop* t = detail::FfiApi::instance().teleop_take_control(robot_);
     if (!t) detail::FfiApi::instance().throw_last("take_control failed");
@@ -651,6 +775,75 @@ class NavigationClient {
  private:
   friend class RobotClient;
   explicit NavigationClient(const DosoRobot* robot) : robot_(robot) {}
+  const DosoRobot* robot_;
+};
+
+class VoiceClient {
+ public:
+  std::string status_json() const {
+    char buf[8192]{};
+    detail::check(detail::FfiApi::instance().voice_status_json(robot_, buf, sizeof(buf)),
+                  "voice status failed");
+    return std::string(buf);
+  }
+  std::string profiles_json() const {
+    char buf[16384]{};
+    detail::check(detail::FfiApi::instance().voice_profiles_json(robot_, buf, sizeof(buf)),
+                  "voice list_profiles failed");
+    return std::string(buf);
+  }
+  void switch_profile(const std::string& profile_id) const {
+    detail::check(detail::FfiApi::instance().voice_switch_profile(robot_, profile_id.c_str()),
+                  "voice switch_profile failed");
+  }
+  std::string speak(const std::string& text, const std::string& priority = "normal",
+                    const std::string& queue_policy = "enqueue",
+                    const std::string& voice_profile_id = "") const {
+    char pb_buf[128]{};
+    detail::check(detail::FfiApi::instance().voice_speak(
+                      robot_, text.c_str(), priority.c_str(), queue_policy.c_str(),
+                      voice_profile_id.empty() ? nullptr : voice_profile_id.c_str(), pb_buf,
+                      sizeof(pb_buf)),
+                  "voice speak failed");
+    return std::string(pb_buf);
+  }
+  std::string playback_status_json(const std::string& playback_id) const {
+    char buf[4096]{};
+    detail::check(detail::FfiApi::instance().voice_playback_status_json(
+                      robot_, playback_id.c_str(), buf, sizeof(buf)),
+                  "voice playback_status failed");
+    return std::string(buf);
+  }
+  void cancel_playback(const std::string& playback_id,
+                       const std::string& reason = "operator_cancelled") const {
+    detail::check(detail::FfiApi::instance().voice_cancel_playback(
+                      robot_, playback_id.c_str(), reason.c_str()),
+                  "voice cancel_playback failed");
+  }
+  void switch_component(const std::string& component, const std::string& provider,
+                        const std::string& model = "", bool validate = false) const {
+    detail::check(detail::FfiApi::instance().voice_switch_component(
+                      robot_, component.c_str(), provider.c_str(),
+                      model.empty() ? nullptr : model.c_str(), validate ? 1 : 0),
+                  "voice switch_component failed");
+  }
+  void update_prompt(const std::string& system_prompt) const {
+    detail::check(detail::FfiApi::instance().voice_update_prompt(robot_, system_prompt.c_str()),
+                  "voice update_prompt failed");
+  }
+  std::string chat_json(const std::string& text, const std::string& thread_id = "",
+                        bool speak_reply = false) const {
+    char buf[16384]{};
+    detail::check(detail::FfiApi::instance().voice_chat_json(
+                      robot_, text.c_str(), thread_id.empty() ? nullptr : thread_id.c_str(),
+                      speak_reply ? 1 : 0, buf, sizeof(buf)),
+                  "voice chat failed");
+    return std::string(buf);
+  }
+
+ private:
+  friend class RobotClient;
+  explicit VoiceClient(const DosoRobot* robot) : robot_(robot) {}
   const DosoRobot* robot_;
 };
 
@@ -703,6 +896,7 @@ class RobotClient {
         raw.observations != 0,     raw.navigation != 0,
         raw.maps != 0,             raw.localization != 0,
         raw.tasks != 0,            raw.board_b_autonomy != 0,
+        raw.voice != 0,
     };
   }
 
@@ -710,6 +904,7 @@ class RobotClient {
   SportClient motion() const noexcept { return SportClient(handle_); }
   ObservationsClient observations() const noexcept { return ObservationsClient(handle_); }
   NavigationClient navigation() const noexcept { return NavigationClient(handle_); }
+  VoiceClient voice() const noexcept { return VoiceClient(handle_); }
 
   LowLevelSession low_level() const {
     DosoLowLevel* s = detail::FfiApi::instance().low_level_enter(handle_);

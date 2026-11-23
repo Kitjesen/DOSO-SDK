@@ -99,6 +99,10 @@ service RobotControl {
   rpc SwitchProfile(ProfileRequest) returns (ProfileInfo);
   // 获取当前策略信息。
   rpc GetProfile(google.protobuf.Empty) returns (ProfileInfo);
+  // 设置高度控制模式的目标机身高度（米）。仅 height 模式支持。
+  rpc SetBodyHeight(BodyHeightCommand) returns (BodyHeightStatus);
+  // 读取高度控制模式的当前值、目标值和范围。
+  rpc GetBodyHeightStatus(google.protobuf.Empty) returns (BodyHeightStatus);
 
   // ──── 动作系统 ────
 
@@ -260,6 +264,19 @@ message ProfileInfo {
   string current_description = 4;
   repeated RobotModeCapability mode_capabilities = 5;
   string active_mode_id = 6;
+}
+
+message BodyHeightCommand {
+  double height_m = 1;
+}
+
+message BodyHeightStatus {
+  bool supported = 1;
+  double current_height_m = 2;
+  double target_height_m = 3;
+  double min_height_m = 4;
+  double max_height_m = 5;
+  double rate_mps = 6;
 }
 
 // 运动指令。

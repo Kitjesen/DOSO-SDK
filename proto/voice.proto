@@ -1,0 +1,17 @@
+syntax = "proto3";
+package doso.v1;
+
+import "common.proto";
+import public "messages/voice.proto";
+
+service Voice {
+  rpc Status(Empty) returns (VoiceSystemStatus);
+  rpc ListProfiles(Empty) returns (VoiceProfileList);
+  rpc SwitchProfile(VoiceSwitchProfileRequest) returns (Receipt);
+  rpc Speak(VoiceSpeakRequest) returns (VoicePlayback);
+  rpc PlaybackStatus(VoicePlaybackQuery) returns (VoicePlayback);
+  rpc CancelPlayback(VoicePlaybackCancelRequest) returns (VoicePlayback);
+  rpc SwitchComponent(VoiceSwitchComponentRequest) returns (Receipt);
+  rpc UpdatePrompt(VoiceUpdatePromptRequest) returns (Receipt);
+  rpc Chat(VoiceChatRequest) returns (VoiceChatReply);
+}
