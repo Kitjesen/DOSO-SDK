@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
 
 use crate::hardware::robostride::{
-    decode_rs_frame_with_limits, fault_bits_to_error_u8, RawCanFrame, RsDecodedState, RsEvent,
-    RsKey,
+    decode_compressed_error_names, decode_fault_bits_32_names, decode_rs_frame_with_limits,
+    decode_warning_bits_32_names, fault_bits_to_error_u8, RawCanFrame, RsDecodedState, RsEvent,
+    RsKey, RsRunMode,
 };
 use crate::hardware::CanBusFrame;
 use crate::params::{LegId, RobotHardwareParams, NUM_JOINTS};
@@ -71,15 +72,16 @@ pub fn parse_can_ifaces_override(raw: &str) -> Option<[String; 4]> {
     parts.try_into().ok()
 }
 
-/// Builds the canonical 84-frame Thunder CAN bringup sequence with an explicit wheel CAN timeout:
+/// Builds the 100-frame Thunder CAN bringup sequence with an explicit wheel CAN timeout:
 /// 1. `disable_all(false)` across `FR/FL/RR/RL` `can_id = 1..=4` (16 frames)
 /// 2. `disable_all(true)` (clear faults) across `FR/FL/RR/RL` `can_id = 1..=4` (16 frames)
-/// 3. `set_cantimeout_us(4, wheel_can_timeout_us)` on all 4 legs' wheel motors `can_id = 4` (4 frames)
-/// 4. `3x set_reporting(can_id, true)` for `can_id = 1..=4` across all 4 legs (48 frames)
+/// 3. `set_run_mode(can_id, RsRunMode::Control)` (`0x7005 = 0`) across `FR/FL/RR/RL` `can_id = 1..=4` (16 frames)
+/// 4. `set_cantimeout_us(4, wheel_can_timeout_us)` on all 4 legs' wheel motors `can_id = 4` (4 frames)
+/// 5. `3x set_reporting(can_id, true)` for `can_id = 1..=4` across all 4 legs (48 frames)
 pub fn build_can_startup_frames_with_timeout(
     wheel_can_timeout_us: u32,
 ) -> Result<Vec<CanBusFrame>> {
-    let mut out = Vec::with_capacity(84);
+    let mut out = Vec::with_capacity(100);
     for leg in LegId::ALL {
         for can_id in 1..=4 {
             out.push(CanBusFrame {
@@ -93,6 +95,14 @@ pub fn build_can_startup_frames_with_timeout(
             out.push(CanBusFrame {
                 leg,
                 frame: RsEvent::disable(can_id, true).encode()?,
+            });
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            out.push(CanBusFrame {
+                leg,
+                frame: RsEvent::set_run_mode(can_id, RsRunMode::Control).encode()?,
             });
         }
     }
@@ -115,7 +125,7 @@ pub fn build_can_startup_frames_with_timeout(
     Ok(out)
 }
 
-/// Builds the canonical 84-frame Thunder CAN bringup sequence using `config/thunder_v4.yaml`.
+/// Builds the 100-frame Thunder CAN bringup sequence using `config/thunder_v4.yaml`.
 pub fn build_can_startup_frames() -> Result<Vec<CanBusFrame>> {
     build_can_startup_frames_with_timeout(
         RobotHardwareParams::thunder_v4()
@@ -138,6 +148,39 @@ pub fn build_leg_set_zero_frames() -> Result<Vec<CanBusFrame>> {
     Ok(out)
 }
 
+/// Builds the full 48-frame 3-phase whole-robot zero calibration sequence matching Dart `RealJoint.setZero()`:
+/// - Phase 0 (16 frames): `Type 6 SetZero` across `FR/FL/RR/RL`, `can_id = 1..=4`
+/// - Phase 1 (16 frames): `Type 18 SetParam(zero_sta = 1)` (`0x7029 = 1`, signed `-π..π` range on power-up)
+/// - Phase 2 (16 frames): `Type 22 SaveData` (`[1,2,3,4,5,6,7,8]`, persists `zero_sta` & calibration to motor Flash)
+pub fn build_all_set_zero_frames() -> Result<Vec<CanBusFrame>> {
+    let mut out = Vec::with_capacity(48);
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            out.push(CanBusFrame {
+                leg,
+                frame: RsEvent::set_zero(can_id).encode()?,
+            });
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            out.push(CanBusFrame {
+                leg,
+                frame: RsEvent::set_zero_sta(can_id, true).encode()?,
+            });
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            out.push(CanBusFrame {
+                leg,
+                frame: RsEvent::save_data(can_id).encode()?,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Cross-platform deterministic CAN supervisor state machine backing `SocketCanHal` (and testable on Windows).
 pub struct SocketCanCore {
     params: RobotHardwareParams,
@@ -151,6 +194,7 @@ pub struct SocketCanCore {
     seq: u64,
     imu: ImuState,
     joints: [JointFeedback; NUM_JOINTS],
+    firmware_versions: [Option<[u8; 4]>; NUM_JOINTS],
     rx_frames: u64,
 }
 
@@ -175,6 +219,7 @@ impl SocketCanCore {
             seq: 0,
             imu: ImuState::default(),
             joints: [JointFeedback::default(); NUM_JOINTS],
+            firmware_versions: [None; NUM_JOINTS],
             rx_frames: 0,
         };
         let startup = core.maybe_take_startup_frames()?;
@@ -203,6 +248,10 @@ impl SocketCanCore {
 
     pub fn joints(&self) -> &[JointFeedback; NUM_JOINTS] {
         &self.joints
+    }
+
+    pub fn firmware_versions(&self) -> &[Option<[u8; 4]>; NUM_JOINTS] {
+        &self.firmware_versions
     }
 
     pub fn set_imu(&mut self, imu: ImuState) {
@@ -256,6 +305,17 @@ impl SocketCanCore {
             RsDecodedState::Motion(m) => {
                 if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, m.can_id) {
                     let slot = &mut self.joints[flat_idx];
+                    let prev_err = slot.error_bits;
+                    if m.error_bits != 0 && m.error_bits != prev_err {
+                        let names = decode_compressed_error_names(m.error_bits);
+                        tracing::warn!(
+                            leg = ?leg,
+                            can_id = m.can_id,
+                            error_bits = format_args!("0x{:02x}", m.error_bits),
+                            faults = ?names,
+                            "RobStride motor feedback reported error bits"
+                        );
+                    }
                     slot.q = m.position;
                     slot.dq = m.velocity;
                     slot.tau = m.torque;
@@ -270,27 +330,53 @@ impl SocketCanCore {
                     }
                 }
             }
-            RsDecodedState::ParamFloat {
+            RsDecodedState::Param {
                 can_id,
                 key: RsKey::Vbus,
                 value,
                 ..
             } => {
-                if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, can_id) {
-                    self.joints[flat_idx].vbus_v = value;
+                if let (Some(flat_idx), Some(v)) = (
+                    self.params.leg_can_to_flat_index(leg, can_id),
+                    value.as_f32(),
+                ) {
+                    self.joints[flat_idx].vbus_v = v;
+                }
+            }
+            RsDecodedState::FirmwareVersion(v) => {
+                if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, v.can_id) {
+                    self.firmware_versions[flat_idx] = Some(v.version);
                 }
             }
             RsDecodedState::FaultFrame {
-                can_id, fault_bits, ..
+                can_id,
+                fault_bits,
+                warning_bits,
+                ..
             } => {
                 if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, can_id) {
                     let slot = &mut self.joints[flat_idx];
-                    slot.error_bits = fault_bits_to_error_u8(fault_bits);
+                    let prev_err = slot.error_bits;
+                    let folded = fault_bits_to_error_u8(fault_bits);
+                    if (fault_bits != 0 && folded != prev_err) || warning_bits != 0 {
+                        let fault_names = decode_fault_bits_32_names(fault_bits);
+                        let warning_names = decode_warning_bits_32_names(warning_bits);
+                        tracing::warn!(
+                            leg = ?leg,
+                            can_id,
+                            fault_bits = format_args!("0x{fault_bits:08x}"),
+                            warning_bits = format_args!("0x{warning_bits:08x}"),
+                            faults = ?fault_names,
+                            warnings = ?warning_names,
+                            "RobStride Type-21 fault/warning frame"
+                        );
+                    }
+                    slot.error_bits = folded;
                     slot.last_seen_us = now_us;
                     slot.online = true;
                 }
             }
-            _ => {}
+            RsDecodedState::DeviceId(_) | RsDecodedState::Param { .. } => {}
         }
     }
 
@@ -430,7 +516,7 @@ impl SocketCanCore {
         if !self.motor_disable_confirmed() {
             bail!("calibrate_set_zero refused: motor disable is not confirmed");
         }
-        build_leg_set_zero_frames()
+        build_all_set_zero_frames()
     }
 }
 
@@ -495,7 +581,7 @@ mod linux_hal {
         const CAN_EFF_MASK: u32 = 0x1FFF_FFFF;
 
         /// Opens `FR/FL/RR/RL` SocketCAN interfaces configured in `params` (with env overrides),
-        /// executes the 84-frame CAN startup sequence if `tx_enabled`, and wires optional IMU & remote readers.
+        /// executes the 100-frame CAN startup sequence if `tx_enabled`, and wires optional IMU & remote readers.
         pub fn open_with_params(params: &RobotHardwareParams, tx_enabled: bool) -> Result<Self> {
             let env_or = |key: &str, fallback: &str| -> String {
                 std::env::var(key)
@@ -650,10 +736,10 @@ mod linux_hal {
             if frames.is_empty() {
                 return;
             }
-            // Pace batches slightly across the 84-frame sequence so hardware CAN TX queues never drop
+            // Pace batches slightly across the 100-frame sequence so hardware CAN TX queues never drop
             for (idx, item) in frames.iter().enumerate() {
                 self.send_raw(item.leg, item.frame);
-                if idx == 15 || idx == 31 || idx == 35 || idx == 51 || idx == 67 {
+                if idx == 15 || idx == 31 || idx == 47 || idx == 51 || idx == 67 || idx == 83 {
                     thread::sleep(Duration::from_millis(10));
                 }
             }
@@ -953,10 +1039,16 @@ mod linux_hal {
 
         fn calibrate_set_zero(&mut self) -> Result<()> {
             let frames = self.core.calibrate_set_zero()?;
-            for item in frames {
+            for (idx, item) in frames.iter().enumerate() {
+                // 3-phase 48-frame write (`16 SetZero`, `16 zero_sta=1`, `16 SaveData`):
+                // let CAN TX drain 2ms between phases matching Dart `RealJoint.setZero()`.
+                if idx == 16 || idx == 32 {
+                    thread::sleep(Duration::from_millis(2));
+                }
                 if !self.send_raw_checked(item.leg, item.frame) {
                     bail!(
-                        "calibrate_set_zero aborted: SocketCAN immediate write failed on {:?}",
+                        "calibrate_set_zero aborted at frame {idx}/{}: SocketCAN immediate write failed on {:?}",
+                        frames.len(),
                         item.leg
                     );
                 }
