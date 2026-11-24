@@ -766,7 +766,7 @@ fn standing_gesture_and_external_enforce_joint_bounds_and_external_timeout_soft_
     // 1. Out-of-envelope ExternalControl frame must be rejected cleanly
     let mut now_us = 10_000u64;
     engine.external_enter("ext-safe-1", now_us).unwrap();
-    engine.enable_motors().unwrap();
+    engine.external_enable_motors().unwrap();
     let mut oob_cmd = MitCmd16::default();
     oob_cmd.0[0].q = 2.5; // > hip limit 0.39 rad (would pass raw 12.57 motor limit)
     oob_cmd.0[0].kp = 80.0;
@@ -917,4 +917,67 @@ fn recovery_enable_enables_motors_and_rejects_cleanly_when_disallowed() {
     ok_engine.recovery_enable(&tok_ok, 2_000).unwrap();
     assert_eq!(ok_engine.recovery.phase(), RecoveryPhase::Waiting);
     assert!(ok_engine.safety.motor_output_enabled());
+}
+
+#[test]
+fn fsm_guards_require_enabled_online_proprio_and_clear_fault_resets_grounded() {
+    struct OfflineSocketCanHal(BenchNullHal);
+    impl HalBackend for OfflineSocketCanHal {
+        fn name(&self) -> &'static str {
+            "socketcan-rdk-s100"
+        }
+        fn sample_proprio(&mut self, now_us: u64) -> ProprioFrame {
+            let mut p = self.0.sample_proprio(now_us);
+            p.imu.online = false;
+            p
+        }
+        fn sample_remote(&mut self, now_us: u64) -> RemotePadState {
+            self.0.sample_remote(now_us)
+        }
+        fn set_tx_enabled(&mut self, enabled: bool) {
+            self.0.set_tx_enabled(enabled);
+        }
+        fn tx_enabled(&self) -> bool {
+            self.0.tx_enabled()
+        }
+        fn enable_motors(&mut self) -> Result<()> {
+            self.0.enable_motors()
+        }
+        fn disable_motors(&mut self, clear_errors: bool) -> Result<()> {
+            self.0.disable_motors(clear_errors)
+        }
+        fn send_mit_verified(&mut self, cmd: &MitCmd16) -> Result<()> {
+            self.0.send_mit_verified(cmd)
+        }
+        fn diagnostics(&self) -> HalDiagnostics {
+            self.0.diagnostics()
+        }
+    }
+
+    let mut engine = BrainEngine::new(
+        Box::new(OfflineSocketCanHal(BenchNullHal::new(true))),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    // 1. stand_up rejected when motors disabled
+    assert!(engine.stand_up().is_err());
+
+    // 2. stand_up rejected when motors enabled but IMU/proprio is offline on socketcan
+    engine.enable_motors().unwrap();
+    engine.tick_200hz(10_000);
+    assert!(engine.stand_up().is_err());
+
+    // 3. external_enter moves to External where Grounded enable_motors fails, clear_motor_fault resets Grounded
+    engine.disable_motors(false).unwrap();
+    engine.external_enter("ext-guard-1", 20_000).unwrap();
+    assert!(engine.enable_motors().is_err());
+    engine.external_enable_motors().unwrap();
+    assert!(engine.safety.motor_output_enabled());
+    engine.clear_motor_fault().unwrap();
+    assert_eq!(engine.fsm_state(), FsmState::Grounded);
+    assert!(!engine.safety.motor_output_enabled());
 }

@@ -108,6 +108,7 @@ impl SafetyGate {
 
     pub fn clear_fault(&mut self, hal: &mut dyn HalBackend) -> Result<()> {
         self.latched_fault = None;
+        self.motor_output_enabled = false;
         hal.disable_motors(true)
     }
 
@@ -257,6 +258,13 @@ impl SafetyGate {
     ) {
         self.rejected_frames += 1;
         self.latched_fault = Some(reason);
+        tracing::warn!(
+            reason = ?reason,
+            online_mask = format_args!("{:#06x}", proprio.online_mask()),
+            imu_online = proprio.imu.online,
+            upright_cos = -proprio.imu.projected_gravity[2],
+            "SafetyGate tripped into passive damp"
+        );
         let damp = self.passive_damping_frame(proprio);
         let _ = hal.send_mit_verified(&damp);
         let _ = hal.disable_motors(false);

@@ -1027,7 +1027,7 @@ async fn rt_loop_200hz_walking_preserves_low_jitter_under_concurrent_health_and_
     struct DeadSocketCanMock;
     impl HalBackend for DeadSocketCanMock {
         fn name(&self) -> &'static str {
-            "socketcan"
+            "socketcan-rdk-s100"
         }
         fn sample_proprio(&mut self, _now_us: u64) -> ProprioFrame {
             ProprioFrame::default()
@@ -1050,7 +1050,7 @@ async fn rt_loop_200hz_walking_preserves_low_jitter_under_concurrent_health_and_
         }
         fn diagnostics(&self) -> HalDiagnostics {
             HalDiagnostics {
-                backend_name: "socketcan",
+                backend_name: "socketcan-rdk-s100",
                 tx_enabled: false,
                 tx_frames: 0,
                 rx_frames: 0,

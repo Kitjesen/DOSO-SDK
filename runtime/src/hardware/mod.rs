@@ -73,5 +73,6 @@ pub use serial_imu::{
 pub use socketcan::SocketCanHal;
 pub use socketcan::{
     build_can_startup_frames, build_can_startup_frames_with_timeout, build_leg_set_zero_frames,
-    partition_mit_cmd_by_leg, LegCanBatch, SocketCanCore, MOTORS_PER_LEG, RX_MMSG_BATCH,
+    parse_can_ifaces_override, partition_mit_cmd_by_leg, LegCanBatch, SocketCanCore,
+    MOTORS_PER_LEG, RX_MMSG_BATCH,
 };

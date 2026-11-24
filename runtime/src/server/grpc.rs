@@ -1012,9 +1012,8 @@ impl rpc::robot_control_server::RobotControl for BrainstemGrpcServer {
     ) -> std::result::Result<Response<()>, Status> {
         let now = self.shared.now_us();
         let mut guard = self.shared.engine.lock().unwrap();
-        let BrainEngine { safety, hal, .. } = &mut *guard;
-        safety
-            .clear_fault(hal.as_mut())
+        guard
+            .clear_motor_fault()
             .map_err(|e| Status::internal(e.to_string()))?;
         self.shared.refresh_telemetry(&guard, now);
         Ok(Response::new(()))
@@ -1094,7 +1093,7 @@ impl rpc::robot_external_control_server::RobotExternalControl for BrainstemGrpcS
         let now = self.shared.now_us();
         let mut guard = self.shared.engine.lock().unwrap();
         guard
-            .enable_motors()
+            .external_enable_motors()
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         self.shared.refresh_telemetry(&guard, now);
         Ok(Response::new(ext_status(&guard, false)))

@@ -208,8 +208,12 @@ pub fn resolve_release_metadata(
             exe.parent()
                 .and_then(|p| p.parent())
                 .map(|root| root.join("metadata.json")),
+            exe.parent()
+                .and_then(|p| p.parent())
+                .map(|root| root.join("manifest.json")),
             exe.parent().map(|dir| dir.join("release.json")),
             exe.parent().map(|dir| dir.join("metadata.json")),
+            exe.parent().map(|dir| dir.join("manifest.json")),
         ];
         for cand in candidates.into_iter().flatten() {
             if let Ok(raw) = std::fs::read_to_string(&cand) {
@@ -539,7 +543,7 @@ async fn handle_health(State(state): State<HotDeployState>) -> impl IntoResponse
         let strat_ready = !active.is_empty();
         let imu_ok = tele.proprio.imu.online;
         let joints_ok = tele.proprio.online_mask().count_ones() as u8;
-        let hardware_liveness_ok = if tele.hal_backend == "socketcan" {
+        let hardware_liveness_ok = if tele.hal_backend.starts_with("socketcan") {
             imu_ok && joints_ok == 16 && tele.hal_rx_frames > 0
         } else {
             true
