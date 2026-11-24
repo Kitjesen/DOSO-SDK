@@ -200,6 +200,100 @@ pub struct RobotHardwareParams {
 }
 
 static DEFAULT_THUNDER_V4: OnceLock<RobotHardwareParams> = OnceLock::new();
+static DEFAULT_THUNDER_V4_LOOKUP: OnceLock<JointLookupTable> = OnceLock::new();
+
+/// O(1) stack-friendly lookup tables derived from a validated [`RobotHardwareParams`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointLookupTable {
+    leg_can_to_flat: [[Option<usize>; 4]; 4],
+    flat_to_leg_can: [(LegId, u8); NUM_JOINTS],
+    motor_limits: [MotorLimits; NUM_JOINTS],
+    can_id_limits: [Option<MotorLimits>; 4],
+}
+
+impl JointLookupTable {
+    /// Builds compact O(1) lookup arrays from `params` without scanning `params.joints` on every frame.
+    pub fn from_params(params: &RobotHardwareParams) -> Result<Self> {
+        let mut leg_can_to_flat = [[None; 4]; 4];
+        let mut flat_to_leg_can = [(LegId::Fr, 1u8); NUM_JOINTS];
+        let mut motor_limits = [params.motors.rs04; NUM_JOINTS];
+        let mut can_id_limits = [None; 4];
+        let mut seen = [false; NUM_JOINTS];
+
+        for j in &params.joints {
+            if j.index >= NUM_JOINTS {
+                bail!(
+                    "joint '{}' index {} out of range 0..{NUM_JOINTS}",
+                    j.name,
+                    j.index
+                );
+            }
+            if !(1..=4).contains(&j.can_id) {
+                bail!(
+                    "joint '{}' has invalid can_id {}; expected 1..=4",
+                    j.name,
+                    j.can_id
+                );
+            }
+            let leg_slot = j.leg as usize;
+            let can_slot = (j.can_id - 1) as usize;
+            if leg_can_to_flat[leg_slot][can_slot].is_some() {
+                bail!("duplicate ({:?}, can_id={}) mapping", j.leg, j.can_id);
+            }
+            let limits = params.motors.limits_for(j.motor);
+            leg_can_to_flat[leg_slot][can_slot] = Some(j.index);
+            flat_to_leg_can[j.index] = (j.leg, j.can_id);
+            motor_limits[j.index] = limits;
+            if can_id_limits[can_slot].is_none() {
+                can_id_limits[can_slot] = Some(limits);
+            }
+            seen[j.index] = true;
+        }
+
+        if seen.iter().any(|&ok| !ok) {
+            bail!("hardware params must cover all {NUM_JOINTS} joint indices");
+        }
+
+        Ok(Self {
+            leg_can_to_flat,
+            flat_to_leg_can,
+            motor_limits,
+            can_id_limits,
+        })
+    }
+
+    #[inline]
+    pub const fn leg_can_to_flat_index(&self, leg: LegId, can_id: u8) -> Option<usize> {
+        if can_id < 1 || can_id > 4 {
+            return None;
+        }
+        self.leg_can_to_flat[leg as usize][(can_id - 1) as usize]
+    }
+
+    #[inline]
+    pub const fn flat_index_to_leg_can(&self, flat_idx: usize) -> Option<(LegId, u8)> {
+        if flat_idx >= NUM_JOINTS {
+            return None;
+        }
+        Some(self.flat_to_leg_can[flat_idx])
+    }
+
+    #[inline]
+    pub const fn motor_limits_for_flat_index(&self, flat_idx: usize) -> Option<MotorLimits> {
+        if flat_idx >= NUM_JOINTS {
+            return None;
+        }
+        Some(self.motor_limits[flat_idx])
+    }
+
+    #[inline]
+    pub const fn motor_limits_for_can_id(&self, can_id: u8) -> Option<MotorLimits> {
+        if can_id < 1 || can_id > 4 {
+            return None;
+        }
+        self.can_id_limits[(can_id - 1) as usize]
+    }
+}
 
 impl RobotHardwareParams {
     /// Returns the validated embedded `config/thunder_v4.yaml` configuration.
@@ -208,6 +302,18 @@ impl RobotHardwareParams {
             Self::from_yaml_str(EMBEDDED_THUNDER_V4_YAML)
                 .expect("embedded config/thunder_v4.yaml must be valid")
         })
+    }
+
+    /// Returns the cached O(1) lookup table for `config/thunder_v4.yaml`.
+    pub fn thunder_v4_lookup() -> &'static JointLookupTable {
+        DEFAULT_THUNDER_V4_LOOKUP.get_or_init(|| {
+            JointLookupTable::from_params(Self::thunder_v4())
+                .expect("embedded config/thunder_v4.yaml lookup table must be valid")
+        })
+    }
+
+    pub fn build_lookup_table(&self) -> Result<JointLookupTable> {
+        JointLookupTable::from_params(self)
     }
 
     pub fn from_yaml_str(raw: &str) -> Result<Self> {
@@ -453,23 +559,23 @@ impl RobotHardwareParams {
 /// Converts canonical flat 16-joint index (`0..16`) into `(LegId, can_id 1..=4)` using `thunder_v4.yaml`.
 #[inline]
 pub fn flat_index_to_leg_can(flat_idx: usize) -> Option<(LegId, u8)> {
-    RobotHardwareParams::thunder_v4().flat_index_to_leg_can(flat_idx)
+    RobotHardwareParams::thunder_v4_lookup().flat_index_to_leg_can(flat_idx)
 }
 
 /// Inverse of [`flat_index_to_leg_can`] using `thunder_v4.yaml`.
 #[inline]
 pub fn leg_can_to_flat_index(leg: LegId, can_id: u8) -> Option<usize> {
-    RobotHardwareParams::thunder_v4().leg_can_to_flat_index(leg, can_id)
+    RobotHardwareParams::thunder_v4_lookup().leg_can_to_flat_index(leg, can_id)
 }
 
 /// Looks up [`MotorLimits`] for a flat 16-joint index using `thunder_v4.yaml`.
 #[inline]
 pub fn motor_limits_for_flat_index(flat_idx: usize) -> Option<MotorLimits> {
-    RobotHardwareParams::thunder_v4().motor_limits_for_flat_index(flat_idx)
+    RobotHardwareParams::thunder_v4_lookup().motor_limits_for_flat_index(flat_idx)
 }
 
 /// Looks up [`MotorLimits`] for a RobStride CAN ID (`1..=4`) using `thunder_v4.yaml`.
 #[inline]
 pub fn motor_limits_for_can_id(can_id: u8) -> Option<MotorLimits> {
-    RobotHardwareParams::thunder_v4().motor_limits_for_can_id(can_id)
+    RobotHardwareParams::thunder_v4_lookup().motor_limits_for_can_id(can_id)
 }

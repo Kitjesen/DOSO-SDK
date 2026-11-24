@@ -5,11 +5,13 @@ use crate::hardware::robostride::{
     RsKey,
 };
 use crate::hardware::CanBusFrame;
-use crate::params::{LegId, RobotHardwareParams, NUM_JOINTS};
+use crate::params::{JointLookupTable, LegId, RobotHardwareParams, NUM_JOINTS};
 use crate::types::{ImuState, JointFeedback, MitCmd16, ProprioFrame};
 
 pub const MOTORS_PER_LEG: usize = 4;
 pub const RX_MMSG_BATCH: usize = 16;
+/// Worst-case per-tick maintenance TX count: up to 16 disable retries + 1 round-robin `get_vbus`.
+pub const MAX_MAINTENANCE_FRAMES_PER_TICK: usize = NUM_JOINTS + 1;
 
 /// Stack-allocated 4-frame CAN batch for a single leg (`can_id = 1..=4` in order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,12 +20,68 @@ pub struct LegCanBatch {
     pub frames: [RawCanFrame; MOTORS_PER_LEG],
 }
 
+/// Zero-allocation stack buffer holding per-tick CAN maintenance frames emitted by [`SocketCanCore::sample_proprio_step`].
+#[derive(Debug, Clone, Copy)]
+pub struct MaintenanceFrameBuf {
+    frames: [CanBusFrame; MAX_MAINTENANCE_FRAMES_PER_TICK],
+    len: usize,
+}
+
+impl MaintenanceFrameBuf {
+    const EMPTY_FRAME: CanBusFrame = CanBusFrame {
+        leg: LegId::Fr,
+        frame: RawCanFrame {
+            id: 0,
+            data: [0; 8],
+        },
+    };
+
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            frames: [Self::EMPTY_FRAME; MAX_MAINTENANCE_FRAMES_PER_TICK],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, item: CanBusFrame) -> bool {
+        if self.len >= MAX_MAINTENANCE_FRAMES_PER_TICK {
+            return false;
+        }
+        self.frames[self.len] = item;
+        self.len += 1;
+        true
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[CanBusFrame] {
+        &self.frames[..self.len]
+    }
+
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for MaintenanceFrameBuf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Encodes and partitions a 16-joint [`MitCmd16`] into 4 leg-grouped batches ordered
 /// `[FR, FL, RR, RL]`, where each leg receives `can_id = 1..=4` (`[Hip, Thigh, Calf, Wheel]`)
-/// with exact [`RsEvent::Control`] payloads and zero heap allocation.
-pub fn partition_mit_cmd_by_leg_with_params(
+/// with exact [`RsEvent::Control`] payloads, O(1) table lookup, and zero heap allocation.
+pub fn partition_mit_cmd_by_leg_with_lookup(
     cmd: &MitCmd16,
-    params: &RobotHardwareParams,
+    lookup: &JointLookupTable,
 ) -> Result<[LegCanBatch; 4]> {
     let zero_frame = RawCanFrame {
         id: 0,
@@ -37,10 +95,10 @@ pub fn partition_mit_cmd_by_leg_with_params(
     for (leg_idx, leg) in LegId::ALL.into_iter().enumerate() {
         let mut leg_frames = [zero_frame; MOTORS_PER_LEG];
         for can_id in 1u8..=4u8 {
-            let flat_idx = params
+            let flat_idx = lookup
                 .leg_can_to_flat_index(leg, can_id)
                 .ok_or_else(|| anyhow::anyhow!("Missing joint for ({leg:?}, can_id={can_id})"))?;
-            let limits = params
+            let limits = lookup
                 .motor_limits_for_flat_index(flat_idx)
                 .ok_or_else(|| anyhow::anyhow!("Missing motor limits for joint {flat_idx}"))?;
             let t = &cmd.0[flat_idx];
@@ -55,9 +113,20 @@ pub fn partition_mit_cmd_by_leg_with_params(
     Ok(batches)
 }
 
+/// Encodes and partitions a 16-joint [`MitCmd16`] into 4 leg-grouped batches ordered
+/// `[FR, FL, RR, RL]`, where each leg receives `can_id = 1..=4` (`[Hip, Thigh, Calf, Wheel]`)
+/// with exact [`RsEvent::Control`] payloads and zero heap allocation.
+pub fn partition_mit_cmd_by_leg_with_params(
+    cmd: &MitCmd16,
+    params: &RobotHardwareParams,
+) -> Result<[LegCanBatch; 4]> {
+    let lookup = params.build_lookup_table()?;
+    partition_mit_cmd_by_leg_with_lookup(cmd, &lookup)
+}
+
 /// Encodes and partitions [`MitCmd16`] into 4 leg-grouped batches using `config/thunder_v4.yaml`.
 pub fn partition_mit_cmd_by_leg(cmd: &MitCmd16) -> Result<[LegCanBatch; 4]> {
-    partition_mit_cmd_by_leg_with_params(cmd, RobotHardwareParams::thunder_v4())
+    partition_mit_cmd_by_leg_with_lookup(cmd, RobotHardwareParams::thunder_v4_lookup())
 }
 
 /// Parses a comma-separated `DOSO_CAN_IFACES` override (`fr,fl,rr,rl`) into 4 non-empty interface names.
@@ -141,6 +210,7 @@ pub fn build_leg_set_zero_frames() -> Result<Vec<CanBusFrame>> {
 /// Cross-platform deterministic CAN supervisor state machine backing `SocketCanHal` (and testable on Windows).
 pub struct SocketCanCore {
     params: RobotHardwareParams,
+    lookup: JointLookupTable,
     tx_enabled: bool,
     startup_sent: bool,
     motors_enabled: bool,
@@ -163,8 +233,10 @@ impl SocketCanCore {
         params: &RobotHardwareParams,
         tx_enabled: bool,
     ) -> Result<(Self, Vec<CanBusFrame>)> {
+        let lookup = params.build_lookup_table()?;
         let mut core = Self {
             params: params.clone(),
+            lookup,
             tx_enabled,
             startup_sent: false,
             motors_enabled: false,
@@ -245,16 +317,16 @@ impl SocketCanCore {
     pub fn ingest_rx_frame(&mut self, leg: LegId, raw: RawCanFrame, now_us: u64) {
         self.rx_frames += 1;
         let Ok(decoded) = decode_rs_frame_with_limits(raw, |can_id| {
-            self.params
+            self.lookup
                 .leg_can_to_flat_index(leg, can_id)
-                .and_then(|idx| self.params.motor_limits_for_flat_index(idx))
+                .and_then(|idx| self.lookup.motor_limits_for_flat_index(idx))
                 .ok_or_else(|| anyhow::anyhow!("Invalid ({leg:?}, can_id={can_id})"))
         }) else {
             return;
         };
         match decoded {
             RsDecodedState::Motion(m) => {
-                if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, m.can_id) {
+                if let Some(flat_idx) = self.lookup.leg_can_to_flat_index(leg, m.can_id) {
                     let slot = &mut self.joints[flat_idx];
                     slot.q = m.position;
                     slot.dq = m.velocity;
@@ -276,14 +348,14 @@ impl SocketCanCore {
                 value,
                 ..
             } => {
-                if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, can_id) {
+                if let Some(flat_idx) = self.lookup.leg_can_to_flat_index(leg, can_id) {
                     self.joints[flat_idx].vbus_v = value;
                 }
             }
             RsDecodedState::FaultFrame {
                 can_id, fault_bits, ..
             } => {
-                if let Some(flat_idx) = self.params.leg_can_to_flat_index(leg, can_id) {
+                if let Some(flat_idx) = self.lookup.leg_can_to_flat_index(leg, can_id) {
                     let slot = &mut self.joints[flat_idx];
                     slot.error_bits = fault_bits_to_error_u8(fault_bits);
                     slot.last_seen_us = now_us;
@@ -317,7 +389,7 @@ impl SocketCanCore {
             if self.disable_pending {
                 for idx in 0..NUM_JOINTS {
                     if (self.pending_disable_mask & (1u16 << idx)) != 0 {
-                        let (leg, can_id) = self.params.flat_index_to_leg_can(idx).unwrap();
+                        let (leg, can_id) = self.lookup.flat_index_to_leg_can(idx).unwrap();
                         if let Ok(frame) =
                             RsEvent::disable(can_id, self.disable_clear_errors).encode()
                         {
@@ -330,7 +402,7 @@ impl SocketCanCore {
             // Periodic round-robin get_vbus query across all 16 motors
             let idx = self.vbus_cursor % NUM_JOINTS;
             self.vbus_cursor = (idx + 1) % NUM_JOINTS;
-            let (leg, can_id) = self.params.flat_index_to_leg_can(idx).unwrap();
+            let (leg, can_id) = self.lookup.flat_index_to_leg_can(idx).unwrap();
             if let Ok(frame) = RsEvent::get_vbus(can_id).encode() {
                 on_tx(CanBusFrame { leg, frame });
             }
@@ -402,8 +474,8 @@ impl SocketCanCore {
         }
         let mut out = Vec::with_capacity(NUM_JOINTS);
         for (idx, t) in cmd.0.iter().enumerate() {
-            let (leg, can_id) = self.params.flat_index_to_leg_can(idx).unwrap();
-            let limits = self.params.motor_limits_for_flat_index(idx).unwrap();
+            let (leg, can_id) = self.lookup.flat_index_to_leg_can(idx).unwrap();
+            let limits = self.lookup.motor_limits_for_flat_index(idx).unwrap();
             let frame =
                 RsEvent::encode_control_with_limits(can_id, t.tau, t.q, t.dq, t.kp, t.kd, limits);
             out.push(CanBusFrame { leg, frame });
@@ -417,7 +489,7 @@ impl SocketCanCore {
         if !self.tx_enabled || self.disable_pending || !self.motors_enabled {
             return Ok(None);
         }
-        partition_mit_cmd_by_leg_with_params(cmd, &self.params).map(Some)
+        partition_mit_cmd_by_leg_with_lookup(cmd, &self.lookup).map(Some)
     }
 
     pub fn calibrate_set_zero(&mut self) -> Result<Vec<CanBusFrame>> {
@@ -450,7 +522,7 @@ mod linux_hal {
     use crate::params::{DeviceEndpoints, LegId, RobotHardwareParams};
     use crate::types::{MitCmd16, ProprioFrame, RemotePadState};
 
-    use super::{SocketCanCore, MOTORS_PER_LEG, RX_MMSG_BATCH};
+    use super::{MaintenanceFrameBuf, SocketCanCore, MOTORS_PER_LEG, RX_MMSG_BATCH};
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -898,11 +970,11 @@ mod linux_hal {
             if let Some(ref imu_reader) = self.imu_reader {
                 self.core.set_imu(imu_reader.sample(now_us));
             }
-            let mut maintenance = Vec::with_capacity(4);
+            let mut maintenance = MaintenanceFrameBuf::new();
             let frame = self.core.sample_proprio_step(now_us, |cb| {
-                maintenance.push(cb);
+                let _ = maintenance.push(cb);
             });
-            for item in maintenance {
+            for item in maintenance.as_slice() {
                 self.send_raw(item.leg, item.frame);
             }
             frame

@@ -3,10 +3,13 @@ use doso_runtime::hardware::robostride::{
 };
 use doso_runtime::hardware::{
     build_can_startup_frames, build_leg_set_zero_frames, parse_imu_baud, partition_mit_cmd_by_leg,
-    BenchNullHal, HalBackend, ImuSerialState, SocketCanCore, MOTORS_PER_LEG, RX_MMSG_BATCH,
+    partition_mit_cmd_by_leg_with_lookup, BenchNullHal, HalBackend, ImuSerialState,
+    MaintenanceFrameBuf, SocketCanCore, MAX_MAINTENANCE_FRAMES_PER_TICK, MOTORS_PER_LEG,
+    RX_MMSG_BATCH,
 };
 use doso_runtime::params::{
-    flat_index_to_leg_can, leg_can_to_flat_index, LegId, RobotHardwareParams, NUM_JOINTS,
+    flat_index_to_leg_can, leg_can_to_flat_index, motor_limits_for_can_id,
+    motor_limits_for_flat_index, LegId, RobotHardwareParams, NUM_JOINTS,
 };
 use doso_runtime::types::{MitCmd16, MitTarget};
 
@@ -429,4 +432,73 @@ fn parse_can_ifaces_override_validates_four_comma_separated_interfaces() {
     assert_eq!(parse_can_ifaces_override("can0,can1,can2"), None);
     assert_eq!(parse_can_ifaces_override("can0,can1,can2,can3,can4"), None);
     assert_eq!(parse_can_ifaces_override("can0,,can2,can3"), None);
+}
+
+#[test]
+fn joint_lookup_table_o1_parity_and_bounds() {
+    let params = RobotHardwareParams::thunder_v4();
+    let lookup = params.build_lookup_table().unwrap();
+
+    for idx in 0..NUM_JOINTS {
+        let (leg, can_id) = flat_index_to_leg_can(idx).unwrap();
+        assert_eq!(params.flat_index_to_leg_can(idx), Some((leg, can_id)));
+        assert_eq!(lookup.flat_index_to_leg_can(idx), Some((leg, can_id)));
+        assert_eq!(leg_can_to_flat_index(leg, can_id), Some(idx));
+        assert_eq!(params.leg_can_to_flat_index(leg, can_id), Some(idx));
+        assert_eq!(lookup.leg_can_to_flat_index(leg, can_id), Some(idx));
+        assert_eq!(
+            motor_limits_for_flat_index(idx),
+            params.motor_limits_for_flat_index(idx)
+        );
+        assert_eq!(
+            lookup.motor_limits_for_flat_index(idx),
+            params.motor_limits_for_flat_index(idx)
+        );
+    }
+    for can_id in 1..=4 {
+        assert_eq!(
+            motor_limits_for_can_id(can_id),
+            params.motor_limits_for_can_id(can_id)
+        );
+        assert_eq!(
+            lookup.motor_limits_for_can_id(can_id),
+            params.motor_limits_for_can_id(can_id)
+        );
+    }
+    assert_eq!(lookup.leg_can_to_flat_index(LegId::Fr, 0), None);
+    assert_eq!(lookup.leg_can_to_flat_index(LegId::Fr, 5), None);
+    assert_eq!(lookup.flat_index_to_leg_can(NUM_JOINTS), None);
+    assert_eq!(lookup.motor_limits_for_flat_index(NUM_JOINTS), None);
+    assert_eq!(lookup.motor_limits_for_can_id(0), None);
+    assert_eq!(lookup.motor_limits_for_can_id(5), None);
+
+    let cmd = build_distinct_mit_cmd16();
+    assert_eq!(
+        partition_mit_cmd_by_leg(&cmd).unwrap(),
+        partition_mit_cmd_by_leg_with_lookup(&cmd, &lookup).unwrap()
+    );
+}
+
+#[test]
+fn maintenance_frame_buf_handles_worst_case_17_frames_on_stack() {
+    assert_eq!(MAX_MAINTENANCE_FRAMES_PER_TICK, NUM_JOINTS + 1);
+    let mut buf = MaintenanceFrameBuf::new();
+    assert!(buf.is_empty());
+
+    let (mut core, _) = SocketCanCore::new(true).unwrap();
+    for idx in 0..NUM_JOINTS {
+        let (leg, can_id) = flat_index_to_leg_can(idx).unwrap();
+        core.ingest_rx_frame(leg, make_motion_report_frame(can_id, 2, 0), 10_000);
+    }
+    core.disable_motors(true).unwrap();
+    assert!(core.disable_pending());
+
+    let _ = core.sample_proprio_step(15_000, |cb| {
+        assert!(buf.push(cb), "worst-case 17 frames must fit on stack");
+    });
+    assert_eq!(buf.len(), MAX_MAINTENANCE_FRAMES_PER_TICK);
+    assert_eq!(buf.as_slice().len(), MAX_MAINTENANCE_FRAMES_PER_TICK);
+    // 18th frame rejects safely without panicking
+    let extra = buf.as_slice()[0];
+    assert!(!buf.push(extra));
 }
