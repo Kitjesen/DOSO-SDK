@@ -152,6 +152,8 @@ const NSEC_PER_SEC: i64 = 1_000_000_000;
 const RT_PERIOD_NS: i64 = 5_000_000; // 5ms = 200Hz
 #[cfg(target_os = "linux")]
 const RT_SCHED_FIFO_PRIORITY: i32 = 80;
+#[cfg(target_os = "linux")]
+const DEFAULT_RT_SPIN_US: i64 = 150;
 
 #[cfg(target_os = "linux")]
 #[inline]
@@ -179,21 +181,59 @@ fn ns_to_timespec(total_ns: i64) -> libc::timespec {
 }
 
 #[cfg(target_os = "linux")]
+fn resolve_rt_spin_ns() -> i64 {
+    let spin_us = std::env::var("DOSO_RT_SPIN_US")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|v| v.clamp(0, 1_000))
+        .unwrap_or(DEFAULT_RT_SPIN_US);
+    info!(
+        spin_us,
+        "Configured Linux 200Hz RT hybrid sleep+spin wakeup window"
+    );
+    spin_us * 1_000
+}
+
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn sleep_until_monotonic_ns(deadline_ns: i64, rt_stop: &AtomicBool) {
-    let ts = ns_to_timespec(deadline_ns);
-    loop {
-        // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &ts,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
-            break;
+fn sleep_until_monotonic_ns(deadline_ns: i64, spin_ns: i64, rt_stop: &AtomicBool) {
+    if spin_ns > 0 {
+        let sleep_target = deadline_ns - spin_ns;
+        if monotonic_now_ns() < sleep_target {
+            let ts = ns_to_timespec(sleep_target);
+            loop {
+                // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
+                let rc = unsafe {
+                    libc::clock_nanosleep(
+                        libc::CLOCK_MONOTONIC,
+                        libc::TIMER_ABSTIME,
+                        &ts,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+        while !rt_stop.load(Ordering::Relaxed) && monotonic_now_ns() < deadline_ns {
+            std::hint::spin_loop();
+        }
+    } else {
+        let ts = ns_to_timespec(deadline_ns);
+        loop {
+            // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
+            let rc = unsafe {
+                libc::clock_nanosleep(
+                    libc::CLOCK_MONOTONIC,
+                    libc::TIMER_ABSTIME,
+                    &ts,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
+                break;
+            }
         }
     }
 }
@@ -201,6 +241,15 @@ fn sleep_until_monotonic_ns(deadline_ns: i64, rt_stop: &AtomicBool) {
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn configure_linux_rt_thread() {
+    // SAFETY: prctl(PR_SET_TIMERSLACK, 1) sets minimum 1ns kernel timer slack on calling RT thread.
+    let slack_rc = unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1usize, 0usize, 0usize, 0usize) };
+    if slack_rc == 0 {
+        info!("RT timer slack tightened to 1ns (PR_SET_TIMERSLACK=1)");
+    } else {
+        let err = std::io::Error::last_os_error();
+        warn!(error = %err, "Best-effort PR_SET_TIMERSLACK=1 failed; continuing");
+    }
+
     if let Ok(raw_mlock) = std::env::var("DOSO_RT_MLOCK") {
         let trimmed = raw_mlock.trim();
         if trimmed.eq_ignore_ascii_case("true") || trimmed == "1" {
@@ -329,6 +378,8 @@ async fn main() -> Result<()> {
             let mut last_shm_cmd_seq = 0u64;
 
             #[cfg(target_os = "linux")]
+            let rt_spin_ns = resolve_rt_spin_ns();
+            #[cfg(target_os = "linux")]
             let mut deadline_ns = monotonic_now_ns();
             #[cfg(not(target_os = "linux"))]
             let period = Duration::from_millis(5); // 200Hz
@@ -412,7 +463,7 @@ async fn main() -> Result<()> {
                     deadline_ns += RT_PERIOD_NS;
                     let before_sleep_ns = monotonic_now_ns();
                     if deadline_ns > before_sleep_ns {
-                        sleep_until_monotonic_ns(deadline_ns, &rt_stop);
+                        sleep_until_monotonic_ns(deadline_ns, rt_spin_ns, &rt_stop);
                         let wake_ns = monotonic_now_ns();
                         jitter_us = ((wake_ns - deadline_ns).max(0) / 1_000) as u64;
                     } else {

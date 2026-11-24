@@ -246,7 +246,16 @@ async fn single_process_rust_brainstem_e2e_and_sub_second_hot_deploy() {
     );
 
     // 7. Zero-Restart Hot-Deploy + off-lock 50-frame Shadow Mode zero-stall RT test
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Wait until the 200Hz ring buffer actually holds >= 55 frames (avoids Windows 15.6ms sleep quantum underfill).
+    let fill_deadline = Instant::now() + Duration::from_secs(5);
+    while shared.rt_tick_count.load(Ordering::Relaxed) < 55 {
+        assert!(
+            Instant::now() < fill_deadline,
+            "RT loop failed to accumulate 55 frames within 5s (got {})",
+            shared.rt_tick_count.load(Ordering::Relaxed)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     shared.reset_rt_metrics();
     let tele_before_flat = shared.telemetry.read().unwrap().clone();
 
