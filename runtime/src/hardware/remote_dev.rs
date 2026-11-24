@@ -133,7 +133,7 @@ mod linux_reader {
                 }
                 tty.c_cflag |= libc::CLOCAL | libc::CREAD | libc::CS8;
                 tty.c_cflag &= !(libc::CSTOPB | libc::PARENB | libc::CRTSCTS);
-                tty.c_cc[libc::VMIN] = 0;
+                tty.c_cc[libc::VMIN] = 1;
                 tty.c_cc[libc::VTIME] = 0;
                 libc::tcflush(fd, libc::TCIFLUSH);
                 if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {

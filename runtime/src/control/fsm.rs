@@ -114,19 +114,25 @@ enum TransitionTask {
         target: JointVec16,
         step: usize,
         total: usize,
+        lower: [f64; NUM_JOINTS],
+        upper: [f64; NUM_JOINTS],
     },
     SitDown {
         start: JointVec16,
         target: JointVec16,
         step: usize,
         total: usize,
+        lower: [f64; NUM_JOINTS],
+        upper: [f64; NUM_JOINTS],
     },
     Damp {
         entry: JointVec16,
+        entry_kp: JointVec16,
         tick: usize,
         ramp_counts: usize,
         settled_ticks: usize,
         settle_counts: usize,
+        disable_on_finish: bool,
     },
     Gesture(GesturePlayer),
 }
@@ -150,11 +156,15 @@ pub struct BrainEngine {
     walk_entry_pose: JointVec16,
     walk_entry_frame: usize,
     last_commanded_pose: JointVec16,
+    last_commanded_kp: JointVec16,
     latest_proprio: ProprioFrame,
+    has_proprio: bool,
     sim_proprio_override: Option<ProprioFrame>,
     recent_proprio_ring: VecDeque<ProprioFrame>,
     latest_history: Option<HistoryFrameSnapshot>,
     history_seq: u64,
+    obs_scratch: Vec<f64>,
+    prev_pad_active: bool,
     prev_pad_l1: bool,
     prev_pad_l2: bool,
     prev_pad_r1: bool,
@@ -180,11 +190,15 @@ impl BrainEngine {
             walk_entry_pose: JointVec16(nominal_stand),
             walk_entry_frame: 0,
             last_commanded_pose: JointVec16::zero(),
+            last_commanded_kp: JointVec16::zero(),
             latest_proprio: ProprioFrame::default(),
+            has_proprio: false,
             sim_proprio_override: None,
             recent_proprio_ring: VecDeque::with_capacity(512),
             latest_history: None,
             history_seq: 0,
+            obs_scratch: Vec::with_capacity(600),
+            prev_pad_active: false,
             prev_pad_l1: false,
             prev_pad_l2: false,
             prev_pad_r1: false,
@@ -255,7 +269,11 @@ impl BrainEngine {
         let (prev_kp, prev_kd) = self.active_infer_gains();
         let active = self.policies.switch_active(name_or_slot)?;
         self.sync_height_spec();
-        self.height.start_handover(prev_pose, prev_kp, prev_kd);
+        if self.fsm != FsmState::Grounded && self.safety.motor_output_enabled() {
+            self.height.start_handover(prev_pose, prev_kp, prev_kd);
+        } else {
+            self.height.reset_handover();
+        }
         if let Some(pkg) = self.policies.active() {
             self.gestures =
                 GestureCatalog::with_builtins(&pkg.graph.manifest().posture.standing_pose);
@@ -374,6 +392,41 @@ impl BrainEngine {
         self.recovery.snapshot(grounded_free)
     }
 
+    pub fn fsm_state(&self) -> FsmState {
+        self.fsm
+    }
+
+    pub fn has_critical_motor_fault(&self) -> bool {
+        self.safety.latched_fault().is_some()
+    }
+
+    /// Refreshes an existing [`BrainStatusSnapshot`] in place without allocating strings on steady ticks.
+    pub fn copy_status_into(&self, now_us: u64, dst: &mut BrainStatusSnapshot) {
+        let (transition, gesture_name) = match &self.transition_task {
+            Some(TransitionTask::StandUp { .. }) => (BodyTransitionKind::StandUp, ""),
+            Some(TransitionTask::SitDown { .. }) => (BodyTransitionKind::SitDown, ""),
+            Some(TransitionTask::Gesture(g)) => (BodyTransitionKind::Gesture, g.name()),
+            _ => (BodyTransitionKind::None, ""),
+        };
+        let (acc, rej) = self.arbiter.counts();
+        dst.fsm_state = self.fsm;
+        dst.transition = transition;
+        dst.gesture_name.clear();
+        dst.gesture_name.push_str(gesture_name);
+        dst.motor_output_enabled = self.safety.motor_output_enabled();
+        dst.critical_motor_fault = self.safety.latched_fault().is_some();
+        dst.source_owner = self.arbiter.owner();
+        dst.source_owner_id.clear();
+        dst.source_owner_id.push_str(self.arbiter.owner_id());
+        dst.grpc_lease_active = self.arbiter.grpc_lease_active(now_us);
+        dst.lease_remaining_ms = self.arbiter.lease_remaining_ms(now_us);
+        dst.last_accepted_sequence = self.arbiter.last_sequence();
+        dst.accepted_count = acc;
+        dst.rejected_count = rej;
+        dst.active_profile.clear();
+        dst.active_profile.push_str(self.policies.active_name());
+    }
+
     pub fn status_snapshot(&self, now_us: u64) -> BrainStatusSnapshot {
         let (transition, gesture_name) = match &self.transition_task {
             Some(TransitionTask::StandUp { .. }) => (BodyTransitionKind::StandUp, String::new()),
@@ -404,7 +457,39 @@ impl BrainEngine {
     }
 
     pub fn enable_motors(&mut self) -> Result<()> {
+        if self.fsm != FsmState::Grounded {
+            bail!(
+                "EnableMotors requires Grounded state (current={:?})",
+                self.fsm
+            );
+        }
         self.safety.enable_motors(self.hal.as_mut())
+    }
+
+    pub fn external_enable_motors(&mut self) -> Result<()> {
+        if self.fsm != FsmState::External {
+            bail!(
+                "External EnableMotors requires External state (current={:?})",
+                self.fsm
+            );
+        }
+        self.safety.enable_motors(self.hal.as_mut())
+    }
+
+    pub fn clear_motor_fault(&mut self) -> Result<()> {
+        self.arbiter.force_revoke();
+        self.walk_cmd = WalkCommand::default();
+        self.transition_task = None;
+        self.external = ExternalSessionState::default();
+        self.fsm = FsmState::Grounded;
+        self.safety.clear_fault(self.hal.as_mut())
+    }
+
+    pub fn recovery_enable(&mut self, token: &str, now_us: u64) -> Result<()> {
+        self.recovery.validate_enable(token, now_us)?;
+        self.safety.enable_motors(self.hal.as_mut())?;
+        let current_pos = self.latest_proprio.positions();
+        self.recovery.enable(token, current_pos, now_us)
     }
 
     pub fn disable_motors(&mut self, clear_errors: bool) -> Result<()> {
@@ -417,9 +502,61 @@ impl BrainEngine {
         self.safety.disable_motors(self.hal.as_mut(), clear_errors)
     }
 
+    fn transition_leg_bounds(
+        &self,
+        start: &JointVec16,
+        target: &JointVec16,
+    ) -> ([f64; NUM_JOINTS], [f64; NUM_JOINTS]) {
+        let cfg = self.safety.config();
+        let mut low = cfg.deploy_action_min;
+        let mut high = cfg.deploy_action_max;
+        for i in 0..WHEEL_START_INDEX {
+            let span_min = start.0[i].min(target.0[i]) - 0.05;
+            let span_max = start.0[i].max(target.0[i]) + 0.05;
+            low[i] = low[i].min(span_min).clamp(-3.15, 3.15);
+            high[i] = high[i].max(span_max).clamp(-3.15, 3.15);
+        }
+        (low, high)
+    }
+
+    const fn recovery_leg_bounds() -> ([f64; NUM_JOINTS], [f64; NUM_JOINTS]) {
+        let mut low = [-3.15; NUM_JOINTS];
+        let mut high = [3.15; NUM_JOINTS];
+        let mut i = 0;
+        while i < WHEEL_START_INDEX {
+            if i % 3 == 0 {
+                low[i] = -0.45;
+                high[i] = 0.45;
+            }
+            i += 1;
+        }
+        let mut w = WHEEL_START_INDEX;
+        while w < NUM_JOINTS {
+            low[w] = -37.7;
+            high[w] = 37.7;
+            w += 1;
+        }
+        (low, high)
+    }
+
     pub fn stand_up(&mut self) -> Result<()> {
         if self.fsm != FsmState::Grounded {
             bail!("StandUp requires Grounded state (current={:?})", self.fsm);
+        }
+        if !self.safety.motor_output_enabled() {
+            bail!("StandUp requires motors enabled first");
+        }
+        if let Some(fault) = self.safety.latched_fault() {
+            bail!("StandUp rejected: latched motor fault ({fault:?}); call ClearMotorFault first");
+        }
+        if self.has_proprio || self.hal.name().starts_with("socketcan") {
+            let mask = self.latest_proprio.online_mask();
+            if mask != 0xFFFF || !self.latest_proprio.imu.online {
+                bail!(
+                    "StandUp requires all 16 motors (mask={mask:#06x}) and IMU online (imu={})",
+                    self.latest_proprio.imu.online
+                );
+            }
         }
         let Some(pkg) = self.policies.active() else {
             bail!("No active locomotion policy loaded");
@@ -427,12 +564,16 @@ impl BrainEngine {
         let target = JointVec16(pkg.graph.manifest().posture.standing_pose).discard_wheels();
         let counts = pkg.graph.manifest().posture.stand_up_counts;
         let start = self.latest_proprio.positions().discard_wheels();
+        let (lower, upper) = self.transition_leg_bounds(&start, &target);
+        self.height.reset_handover();
         self.fsm = FsmState::Transitioning;
         self.transition_task = Some(TransitionTask::StandUp {
             start,
             target,
             step: 0,
             total: counts,
+            lower,
+            upper,
         });
         Ok(())
     }
@@ -447,6 +588,7 @@ impl BrainEngine {
         let target = JointVec16(pkg.graph.manifest().posture.sitting_pose).discard_wheels();
         let counts = pkg.graph.manifest().posture.sit_down_counts;
         let start = self.latest_proprio.positions().discard_wheels();
+        let (lower, upper) = self.transition_leg_bounds(&start, &target);
         self.walk_cmd = WalkCommand::default();
         self.fsm = FsmState::Transitioning;
         self.transition_task = Some(TransitionTask::SitDown {
@@ -454,6 +596,8 @@ impl BrainEngine {
             target,
             step: 0,
             total: counts,
+            lower,
+            upper,
         });
         Ok(())
     }
@@ -467,15 +611,32 @@ impl BrainEngine {
     }
 
     fn enter_damp(&mut self) {
+        self.enter_damp_with_disable(false);
+    }
+
+    fn enter_damp_with_disable(&mut self, disable_on_finish: bool) {
         self.arbiter.force_revoke();
         self.walk_cmd = WalkCommand::default();
         self.fsm = FsmState::Damping;
+        let has_cmd_kp = self.last_commanded_kp.0.iter().any(|&k| k > 0.0);
+        let entry = if has_cmd_kp {
+            self.last_commanded_pose.discard_wheels()
+        } else {
+            self.latest_proprio.positions().discard_wheels()
+        };
+        let entry_kp = if has_cmd_kp {
+            self.last_commanded_kp
+        } else {
+            self.active_stand_gains().0
+        };
         self.transition_task = Some(TransitionTask::Damp {
-            entry: self.last_commanded_pose.discard_wheels(),
+            entry,
+            entry_kp,
             tick: 0,
             ramp_counts: 5,
             settled_ticks: 0,
             settle_counts: 25,
+            disable_on_finish,
         });
     }
 
@@ -538,8 +699,9 @@ impl BrainEngine {
         if seq <= self.external.last_sequence {
             bail!("Stale external frame sequence {seq}");
         }
+        let cfg = self.safety.config();
         self.safety
-            .validate_frame(&cmd, None)
+            .validate_frame(&cmd, Some((&cfg.deploy_action_min, &cfg.deploy_action_max)))
             .map_err(|r| anyhow::anyhow!("External SafetyGate rejected frame: {r:?}"))?;
         self.external.last_sequence = seq;
         self.external.expires_us = now_us + 500_000;
@@ -610,11 +772,16 @@ impl BrainEngine {
             self.prev_pad_l1 = false;
             self.prev_pad_l2 = false;
             self.prev_pad_r1 = false;
+            if self.prev_pad_active && self.fsm == FsmState::Walking {
+                self.walk_cmd = WalkCommand::default();
+                self.fsm = FsmState::Standing;
+            }
             if self.arbiter.expire_if_needed(now_us) && self.fsm == FsmState::Walking {
                 self.walk_cmd = WalkCommand::default();
                 self.fsm = FsmState::Standing;
             }
         }
+        self.prev_pad_active = pad.active;
 
         self.tick_counter = self.tick_counter.wrapping_add(1);
         let prev_action = self.last_commanded_pose;
@@ -622,43 +789,52 @@ impl BrainEngine {
         // 1. External 200Hz MIT mode
         if self.fsm == FsmState::External {
             if now_us >= self.external.expires_us {
-                let _ = self.external_exit();
+                self.external = ExternalSessionState::default();
+                if self.safety.motor_output_enabled() {
+                    self.enter_damp_with_disable(true);
+                } else {
+                    let _ = self.safety.disable_motors(self.hal.as_mut(), false);
+                    self.fsm = FsmState::Grounded;
+                }
                 if is_policy_tick {
-                    self.record_history(
+                    self.record_history_slice(
                         now_us,
                         &proprio,
                         prev_action,
                         self.last_commanded_pose,
                         JointVec16::zero(),
                         JointVec16::zero(),
-                        Vec::new(),
+                        &[],
                     );
                 }
                 return;
             }
             if let Some(cmd) = self.external.latest_cmd {
+                let ext_min = self.safety.config().deploy_action_min;
+                let ext_max = self.safety.config().deploy_action_max;
                 let _ = self.safety.filter_and_dispatch(
                     self.hal.as_mut(),
                     &proprio,
                     now_us,
                     false,
-                    None,
+                    Some((&ext_min, &ext_max)),
                     &cmd,
                 );
                 if is_policy_tick {
                     let (pose, kp, kd) = Self::extract_cmd_vectors(&cmd);
                     self.last_commanded_pose = pose;
-                    self.record_history(now_us, &proprio, prev_action, pose, kp, kd, Vec::new());
+                    self.last_commanded_kp = kp;
+                    self.record_history_slice(now_us, &proprio, prev_action, pose, kp, kd, &[]);
                 }
             } else if is_policy_tick {
-                self.record_history(
+                self.record_history_slice(
                     now_us,
                     &proprio,
                     prev_action,
                     self.last_commanded_pose,
                     JointVec16::zero(),
                     JointVec16::zero(),
-                    Vec::new(),
+                    &[],
                 );
             }
             return;
@@ -675,22 +851,24 @@ impl BrainEngine {
                             Ok(Some(cmd)) => {
                                 let (pose, kp, kd) = Self::extract_cmd_vectors(&cmd);
                                 self.last_commanded_pose = pose;
+                                self.last_commanded_kp = kp;
+                                let (rec_min, rec_max) = Self::recovery_leg_bounds();
                                 let _ = self.safety.filter_and_dispatch(
                                     self.hal.as_mut(),
                                     &proprio,
                                     now_us,
                                     false,
-                                    None,
+                                    Some((&rec_min, &rec_max)),
                                     &cmd,
                                 );
-                                self.record_history(
+                                self.record_history_slice(
                                     now_us,
                                     &proprio,
                                     prev_action,
                                     pose,
                                     kp,
                                     kd,
-                                    Vec::new(),
+                                    &[],
                                 );
                                 rec_recorded = true;
                             }
@@ -702,14 +880,14 @@ impl BrainEngine {
                     }
                 }
                 if !rec_recorded {
-                    self.record_history(
+                    self.record_history_slice(
                         now_us,
                         &proprio,
                         prev_action,
                         self.last_commanded_pose,
                         JointVec16::zero(),
                         JointVec16::zero(),
-                        Vec::new(),
+                        &[],
                     );
                 }
             }
@@ -729,14 +907,14 @@ impl BrainEngine {
 
         match self.fsm {
             FsmState::Grounded => {
-                self.record_history(
+                self.record_history_slice(
                     now_us,
                     &proprio,
                     prev_action,
                     self.last_commanded_pose,
                     JointVec16::zero(),
                     JointVec16::zero(),
-                    Vec::new(),
+                    &[],
                 );
             }
             FsmState::Transitioning | FsmState::Damping => {
@@ -747,6 +925,8 @@ impl BrainEngine {
                             target,
                             step,
                             total,
+                            lower,
+                            upper,
                         } => {
                             let t = if *total == 0 {
                                 1.0
@@ -755,13 +935,14 @@ impl BrainEngine {
                             };
                             let pose = JointVec16::lerp(start, target, t).discard_wheels();
                             self.last_commanded_pose = pose;
+                            self.last_commanded_kp = stand_kp;
                             let cmd = MitCmd16::from_action_and_gains(&pose, &stand_kp, &stand_kd);
                             let _ = self.safety.filter_and_dispatch(
                                 self.hal.as_mut(),
                                 &proprio,
                                 now_us,
                                 false,
-                                None,
+                                Some((lower, upper)),
                                 &cmd,
                             );
                             if *step >= *total {
@@ -770,14 +951,14 @@ impl BrainEngine {
                                 *step += 1;
                                 self.transition_task = Some(task);
                             }
-                            self.record_history(
+                            self.record_history_slice(
                                 now_us,
                                 &proprio,
                                 prev_action,
                                 pose,
                                 stand_kp,
                                 stand_kd,
-                                Vec::new(),
+                                &[],
                             );
                         }
                         TransitionTask::SitDown {
@@ -785,6 +966,8 @@ impl BrainEngine {
                             target,
                             step,
                             total,
+                            lower,
+                            upper,
                         } => {
                             let t = if *total == 0 {
                                 1.0
@@ -793,13 +976,14 @@ impl BrainEngine {
                             };
                             let pose = JointVec16::lerp(start, target, t).discard_wheels();
                             self.last_commanded_pose = pose;
+                            self.last_commanded_kp = stand_kp;
                             let cmd = MitCmd16::from_action_and_gains(&pose, &stand_kp, &stand_kd);
                             let _ = self.safety.filter_and_dispatch(
                                 self.hal.as_mut(),
                                 &proprio,
                                 now_us,
                                 false,
-                                None,
+                                Some((lower, upper)),
                                 &cmd,
                             );
                             if *step >= *total {
@@ -808,22 +992,24 @@ impl BrainEngine {
                                 *step += 1;
                                 self.transition_task = Some(task);
                             }
-                            self.record_history(
+                            self.record_history_slice(
                                 now_us,
                                 &proprio,
                                 prev_action,
                                 pose,
                                 stand_kp,
                                 stand_kd,
-                                Vec::new(),
+                                &[],
                             );
                         }
                         TransitionTask::Damp {
                             entry,
+                            entry_kp,
                             tick,
                             ramp_counts,
                             settled_ticks,
                             settle_counts,
+                            disable_on_finish,
                         } => {
                             let scale = if *tick < *ramp_counts {
                                 1.0 - (*tick as f64 / *ramp_counts as f64)
@@ -835,8 +1021,9 @@ impl BrainEngine {
                             } else {
                                 proprio.positions().discard_wheels()
                             };
-                            let kp = JointVec16(std::array::from_fn(|i| stand_kp.0[i] * scale));
+                            let kp = JointVec16(std::array::from_fn(|i| entry_kp.0[i] * scale));
                             self.last_commanded_pose = pose;
+                            self.last_commanded_kp = kp;
                             let cmd = MitCmd16::from_action_and_gains(&pose, &kp, &stand_kd);
                             let _ = self.safety.filter_and_dispatch(
                                 self.hal.as_mut(),
@@ -848,6 +1035,7 @@ impl BrainEngine {
                             );
                             *tick += 1;
                             let mut finished = false;
+                            let should_disable = *disable_on_finish;
                             if *tick >= *ramp_counts {
                                 *settled_ticks += 1;
                                 if *settled_ticks >= *settle_counts {
@@ -857,27 +1045,32 @@ impl BrainEngine {
                             }
                             if !finished {
                                 self.transition_task = Some(task);
+                            } else if should_disable {
+                                let _ = self.safety.disable_motors(self.hal.as_mut(), false);
                             }
-                            self.record_history(
+                            self.record_history_slice(
                                 now_us,
                                 &proprio,
                                 prev_action,
                                 pose,
                                 kp,
                                 stand_kd,
-                                Vec::new(),
+                                &[],
                             );
                         }
                         TransitionTask::Gesture(player) => {
                             let (pose, done) = player.step();
                             self.last_commanded_pose = pose;
+                            self.last_commanded_kp = stand_kp;
                             let cmd = MitCmd16::from_action_and_gains(&pose, &stand_kp, &stand_kd);
+                            let g_min = self.safety.config().deploy_action_min;
+                            let g_max = self.safety.config().deploy_action_max;
                             let _ = self.safety.filter_and_dispatch(
                                 self.hal.as_mut(),
                                 &proprio,
                                 now_us,
                                 true,
-                                None,
+                                Some((&g_min, &g_max)),
                                 &cmd,
                             );
                             if done {
@@ -885,31 +1078,33 @@ impl BrainEngine {
                             } else {
                                 self.transition_task = Some(task);
                             }
-                            self.record_history(
+                            self.record_history_slice(
                                 now_us,
                                 &proprio,
                                 prev_action,
                                 pose,
                                 stand_kp,
                                 stand_kd,
-                                Vec::new(),
+                                &[],
                             );
                         }
                     }
                 } else {
-                    self.record_history(
+                    self.record_history_slice(
                         now_us,
                         &proprio,
                         prev_action,
                         self.last_commanded_pose,
                         JointVec16::zero(),
                         JointVec16::zero(),
-                        Vec::new(),
+                        &[],
                     );
                 }
             }
             FsmState::Standing => {
                 // Keep policy history warm while holding standing pose (or running height policy if active)
+                let stand_min = self.safety.config().deploy_action_min;
+                let stand_max = self.safety.config().deploy_action_max;
                 if self.height.supported {
                     let mut height_step: Option<JointVec16> = None;
                     if let Some(pkg) = self.policies.active_mut() {
@@ -927,45 +1122,39 @@ impl BrainEngine {
                         let (pose, kp, kd) =
                             self.height.apply_handover(raw_target, infer_kp, infer_kd);
                         self.last_commanded_pose = pose;
+                        self.last_commanded_kp = kp;
                         let cmd = MitCmd16::from_action_and_gains(&pose, &kp, &kd);
                         let _ = self.safety.filter_and_dispatch(
                             self.hal.as_mut(),
                             &proprio,
                             now_us,
                             true,
-                            None,
+                            Some((&stand_min, &stand_max)),
                             &cmd,
                         );
-                        self.record_history(
-                            now_us,
-                            &proprio,
-                            prev_action,
-                            pose,
-                            kp,
-                            kd,
-                            Vec::new(),
-                        );
+                        self.record_history_slice(now_us, &proprio, prev_action, pose, kp, kd, &[]);
                         return;
                     }
                 }
                 let pose = self.last_commanded_pose;
+                self.last_commanded_kp = stand_kp;
                 let cmd = MitCmd16::from_action_and_gains(&pose, &stand_kp, &stand_kd);
                 let _ = self.safety.filter_and_dispatch(
                     self.hal.as_mut(),
                     &proprio,
                     now_us,
                     true,
-                    None,
+                    Some((&stand_min, &stand_max)),
                     &cmd,
                 );
-                self.record_history(
+                self.record_history_slice(
                     now_us,
                     &proprio,
                     prev_action,
                     pose,
                     stand_kp,
                     stand_kd,
-                    Vec::new(),
+                    &[],
                 );
             }
             FsmState::Walking => {
@@ -974,7 +1163,7 @@ impl BrainEngine {
                 let entry_frame = self.walk_entry_frame;
                 let mut bounds_opt: Option<([f64; NUM_JOINTS], [f64; NUM_JOINTS])> = None;
                 let mut target_opt: Option<JointVec16> = None;
-                let mut obs_vec: Vec<f64> = Vec::new();
+                self.obs_scratch.clear();
 
                 if let Some(pkg) = self.policies.active_mut() {
                     bounds_opt = Some((
@@ -983,7 +1172,8 @@ impl BrainEngine {
                     ));
                     let ctx = PolicyEvalContext::from_proprio(&proprio, walk_cmd, bh_cmd, false);
                     if let Ok(out) = pkg.step(&ctx) {
-                        obs_vec = pkg.graph.packed_input_f64(0).to_vec();
+                        self.obs_scratch
+                            .extend_from_slice(pkg.graph.packed_input_f64(0));
                         target_opt = Some(blend_walk_entry(
                             &entry_pose,
                             &out.target_action,
@@ -997,6 +1187,7 @@ impl BrainEngine {
                 if let Some(blended) = target_opt {
                     let (pose, kp, kd) = self.height.apply_handover(blended, infer_kp, infer_kd);
                     self.last_commanded_pose = pose;
+                    self.last_commanded_kp = kp;
                     let cmd = MitCmd16::from_action_and_gains(&pose, &kp, &kd);
                     let b_ref = bounds_opt.as_ref().map(|(l, u)| (l, u));
                     let _ = self.safety.filter_and_dispatch(
@@ -1007,17 +1198,28 @@ impl BrainEngine {
                         b_ref,
                         &cmd,
                     );
-                    self.record_history(now_us, &proprio, prev_action, pose, kp, kd, obs_vec);
+                    Self::write_history_slot(
+                        &mut self.latest_history,
+                        &mut self.history_seq,
+                        self.walk_cmd,
+                        now_us,
+                        &proprio,
+                        prev_action,
+                        pose,
+                        kp,
+                        kd,
+                        &self.obs_scratch,
+                    );
                 } else {
                     self.enter_damp();
-                    self.record_history(
+                    self.record_history_slice(
                         now_us,
                         &proprio,
                         prev_action,
                         self.last_commanded_pose,
                         JointVec16::zero(),
                         stand_kd,
-                        Vec::new(),
+                        &[],
                     );
                 }
             }
@@ -1027,6 +1229,7 @@ impl BrainEngine {
 
     fn record_proprio(&mut self, proprio: ProprioFrame) {
         self.latest_proprio = proprio;
+        self.has_proprio = true;
         if self.recent_proprio_ring.len() >= 500 {
             self.recent_proprio_ring.pop_front();
         }
@@ -1034,7 +1237,55 @@ impl BrainEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_history(
+    fn write_history_slot(
+        latest_history: &mut Option<HistoryFrameSnapshot>,
+        history_seq: &mut u64,
+        walk_cmd: WalkCommand,
+        now_us: u64,
+        proprio: &ProprioFrame,
+        action: JointVec16,
+        next_action: JointVec16,
+        kp: JointVec16,
+        kd: JointVec16,
+        observation: &[f64],
+    ) {
+        let joint_pos = proprio.positions();
+        let joint_vel = proprio.velocities();
+        if let Some(h) = latest_history.as_mut() {
+            h.monotonic_us = now_us;
+            h.gyro_rad_s = proprio.imu.gyro_rad_s;
+            h.projected_gravity = proprio.imu.projected_gravity;
+            h.walk_cmd = walk_cmd;
+            h.joint_pos = joint_pos;
+            h.joint_vel = joint_vel;
+            h.action = action;
+            h.next_action = next_action;
+            h.kp = kp;
+            h.kd = kd;
+            h.observation.clear();
+            h.observation.extend_from_slice(observation);
+        } else {
+            let mut obs = Vec::with_capacity(observation.len().max(600));
+            obs.extend_from_slice(observation);
+            *latest_history = Some(HistoryFrameSnapshot {
+                monotonic_us: now_us,
+                gyro_rad_s: proprio.imu.gyro_rad_s,
+                projected_gravity: proprio.imu.projected_gravity,
+                walk_cmd,
+                joint_pos,
+                joint_vel,
+                action,
+                next_action,
+                kp,
+                kd,
+                observation: obs,
+            });
+        }
+        *history_seq = history_seq.wrapping_add(1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_history_slice(
         &mut self,
         now_us: u64,
         proprio: &ProprioFrame,
@@ -1042,22 +1293,20 @@ impl BrainEngine {
         next_action: JointVec16,
         kp: JointVec16,
         kd: JointVec16,
-        observation: Vec<f64>,
+        observation: &[f64],
     ) {
-        self.latest_history = Some(HistoryFrameSnapshot {
-            monotonic_us: now_us,
-            gyro_rad_s: proprio.imu.gyro_rad_s,
-            projected_gravity: proprio.imu.projected_gravity,
-            walk_cmd: self.walk_cmd,
-            joint_pos: proprio.positions(),
-            joint_vel: proprio.velocities(),
+        Self::write_history_slot(
+            &mut self.latest_history,
+            &mut self.history_seq,
+            self.walk_cmd,
+            now_us,
+            proprio,
             action,
             next_action,
             kp,
             kd,
             observation,
-        });
-        self.history_seq = self.history_seq.wrapping_add(1);
+        );
     }
 
     fn extract_cmd_vectors(cmd: &MitCmd16) -> (JointVec16, JointVec16, JointVec16) {

@@ -219,7 +219,7 @@ mod linux_reader {
                 }
                 tty.c_cflag |= libc::CLOCAL | libc::CREAD | libc::CS8;
                 tty.c_cflag &= !(libc::CSTOPB | libc::CRTSCTS);
-                tty.c_cc[libc::VMIN] = 0;
+                tty.c_cc[libc::VMIN] = 1;
                 tty.c_cc[libc::VTIME] = 0;
                 libc::tcflush(fd, libc::TCIFLUSH);
                 if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {
@@ -276,6 +276,9 @@ mod linux_reader {
                     Self::disconnect_fd(&mut fd, &shared);
                     continue;
                 }
+                if (pfd.revents & libc::POLLIN) == 0 {
+                    continue;
+                }
 
                 loop {
                     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -329,6 +332,42 @@ mod linux_reader {
             self.stop_flag.store(true, Ordering::Relaxed);
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::ffi::CStr;
+
+        #[test]
+        fn open_and_configure_tty_sets_vmin_1_vtime_0_on_pty() {
+            let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+            assert!(master_fd >= 0, "posix_openpt failed");
+            assert_eq!(unsafe { libc::grantpt(master_fd) }, 0, "grantpt failed");
+            assert_eq!(unsafe { libc::unlockpt(master_fd) }, 0, "unlockpt failed");
+
+            let mut name_buf = [0 as libc::c_char; 256];
+            let name_rc =
+                unsafe { libc::ptsname_r(master_fd, name_buf.as_mut_ptr(), name_buf.len()) };
+            assert_eq!(name_rc, 0, "ptsname_r failed");
+            let slave_path = unsafe { CStr::from_ptr(name_buf.as_ptr()) }
+                .to_str()
+                .expect("valid pty utf8 path");
+
+            let configured_fd = SerialImuReader::open_and_configure_tty(slave_path, 115_200)
+                .expect("open_and_configure_tty failed");
+
+            let mut term: libc::termios = unsafe { std::mem::zeroed() };
+            let tc_rc = unsafe { libc::tcgetattr(configured_fd, &mut term) };
+            assert_eq!(tc_rc, 0, "tcgetattr failed");
+            assert_eq!(term.c_cc[libc::VMIN], 1);
+            assert_eq!(term.c_cc[libc::VTIME], 0);
+
+            unsafe {
+                libc::close(configured_fd);
+                libc::close(master_fd);
             }
         }
     }

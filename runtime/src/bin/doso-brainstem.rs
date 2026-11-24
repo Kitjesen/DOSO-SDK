@@ -18,8 +18,9 @@ use doso_runtime::safety::{
 };
 use doso_runtime::server::{
     build_hot_deploy_router_with_config, generate_boot_id, parse_watchdog_env_from_os,
-    preload_packages, write_boot_id_marker, BrainstemGrpcServer, HotDeployConfig,
-    LocalStatusGrpcServer, SharedBrain, SystemdWatchdog, DEFAULT_BOOT_ID_MARKER_PATH,
+    preload_packages, resolve_release_metadata, write_boot_id_marker, BrainstemGrpcServer,
+    HotDeployConfig, LocalStatusGrpcServer, SharedBrain, SystemdWatchdog,
+    DEFAULT_BOOT_ID_MARKER_PATH,
 };
 use doso_runtime::types::{MitCmd16, MitTarget};
 use doso_sdk::internal::motion_board::rpc::{
@@ -74,7 +75,11 @@ struct Args {
     gateway_listen: String,
 
     /// Zero-restart `<10s` Policy Hot-Deploy & `/health` HTTP API listen address.
-    #[arg(long, env = "DOSO_POLICY_ADMIN_LISTEN", default_value = "0.0.0.0:5054")]
+    #[arg(
+        long,
+        env = "DOSO_POLICY_ADMIN_LISTEN",
+        default_value = "127.0.0.1:5054"
+    )]
     admin_listen: String,
 
     /// Optional Bearer token guarding `/v1/policies*` endpoints (`/health` remains readable).
@@ -147,6 +152,8 @@ const NSEC_PER_SEC: i64 = 1_000_000_000;
 const RT_PERIOD_NS: i64 = 5_000_000; // 5ms = 200Hz
 #[cfg(target_os = "linux")]
 const RT_SCHED_FIFO_PRIORITY: i32 = 80;
+#[cfg(target_os = "linux")]
+const DEFAULT_RT_SPIN_US: i64 = 150;
 
 #[cfg(target_os = "linux")]
 #[inline]
@@ -174,21 +181,59 @@ fn ns_to_timespec(total_ns: i64) -> libc::timespec {
 }
 
 #[cfg(target_os = "linux")]
+fn resolve_rt_spin_ns() -> i64 {
+    let spin_us = std::env::var("DOSO_RT_SPIN_US")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|v| v.clamp(0, 1_000))
+        .unwrap_or(DEFAULT_RT_SPIN_US);
+    info!(
+        spin_us,
+        "Configured Linux 200Hz RT hybrid sleep+spin wakeup window"
+    );
+    spin_us * 1_000
+}
+
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn sleep_until_monotonic_ns(deadline_ns: i64, rt_stop: &AtomicBool) {
-    let ts = ns_to_timespec(deadline_ns);
-    loop {
-        // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &ts,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
-            break;
+fn sleep_until_monotonic_ns(deadline_ns: i64, spin_ns: i64, rt_stop: &AtomicBool) {
+    if spin_ns > 0 {
+        let sleep_target = deadline_ns - spin_ns;
+        if monotonic_now_ns() < sleep_target {
+            let ts = ns_to_timespec(sleep_target);
+            loop {
+                // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
+                let rc = unsafe {
+                    libc::clock_nanosleep(
+                        libc::CLOCK_MONOTONIC,
+                        libc::TIMER_ABSTIME,
+                        &ts,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+        while !rt_stop.load(Ordering::Relaxed) && monotonic_now_ns() < deadline_ns {
+            std::hint::spin_loop();
+        }
+    } else {
+        let ts = ns_to_timespec(deadline_ns);
+        loop {
+            // SAFETY: absolute CLOCK_MONOTONIC sleep with valid timespec and null remain pointer.
+            let rc = unsafe {
+                libc::clock_nanosleep(
+                    libc::CLOCK_MONOTONIC,
+                    libc::TIMER_ABSTIME,
+                    &ts,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc != libc::EINTR || rt_stop.load(Ordering::Relaxed) {
+                break;
+            }
         }
     }
 }
@@ -196,6 +241,15 @@ fn sleep_until_monotonic_ns(deadline_ns: i64, rt_stop: &AtomicBool) {
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn configure_linux_rt_thread() {
+    // SAFETY: prctl(PR_SET_TIMERSLACK, 1) sets minimum 1ns kernel timer slack on calling RT thread.
+    let slack_rc = unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1usize, 0usize, 0usize, 0usize) };
+    if slack_rc == 0 {
+        info!("RT timer slack tightened to 1ns (PR_SET_TIMERSLACK=1)");
+    } else {
+        let err = std::io::Error::last_os_error();
+        warn!(error = %err, "Best-effort PR_SET_TIMERSLACK=1 failed; continuing");
+    }
+
     if let Ok(raw_mlock) = std::env::var("DOSO_RT_MLOCK") {
         let trimmed = raw_mlock.trim();
         if trimmed.eq_ignore_ascii_case("true") || trimmed == "1" {
@@ -324,6 +378,8 @@ async fn main() -> Result<()> {
             let mut last_shm_cmd_seq = 0u64;
 
             #[cfg(target_os = "linux")]
+            let rt_spin_ns = resolve_rt_spin_ns();
+            #[cfg(target_os = "linux")]
             let mut deadline_ns = monotonic_now_ns();
             #[cfg(not(target_os = "linux"))]
             let period = Duration::from_millis(5); // 200Hz
@@ -370,7 +426,6 @@ async fn main() -> Result<()> {
 
                     let payload = if shm_writer.is_some() {
                         let p = guard.latest_proprio();
-                        let st = guard.status_snapshot(now_us);
                         Some(DosoProprioPayload {
                             sequence: p.sequence,
                             monotonic_us: p.monotonic_us,
@@ -384,10 +439,10 @@ async fn main() -> Result<()> {
                             joint_status: std::array::from_fn(|i| p.joints[i].status_code as u16),
                             joint_online_mask: p.online_mask(),
                             imu_fresh: u8::from(p.imu.online),
-                            cms_state: st.fsm_state.to_public_body_kind() as u8,
-                            control_owner: st.source_owner as u8,
-                            motor_output_enabled: u8::from(st.motor_output_enabled),
-                            critical_motor_fault: u8::from(st.critical_motor_fault),
+                            cms_state: guard.fsm_state().to_public_body_kind() as u8,
+                            control_owner: guard.arbiter.owner() as u8,
+                            motor_output_enabled: u8::from(guard.safety.motor_output_enabled()),
+                            critical_motor_fault: u8::from(guard.has_critical_motor_fault()),
                             _reserved: [0; 9],
                         })
                     } else {
@@ -408,7 +463,7 @@ async fn main() -> Result<()> {
                     deadline_ns += RT_PERIOD_NS;
                     let before_sleep_ns = monotonic_now_ns();
                     if deadline_ns > before_sleep_ns {
-                        sleep_until_monotonic_ns(deadline_ns, &rt_stop);
+                        sleep_until_monotonic_ns(deadline_ns, rt_spin_ns, &rt_stop);
                         let wake_ns = monotonic_now_ns();
                         jitter_us = ((wake_ns - deadline_ns).max(0) / 1_000) as u64;
                     } else {
@@ -489,13 +544,19 @@ async fn main() -> Result<()> {
         (None, None)
     };
 
+    let (resolved_version, resolved_release_id) = resolve_release_metadata(
+        std::env::current_exe().ok().as_deref(),
+        &args.firmware_version,
+        args.release_id.as_deref(),
+    );
+
     // 3. Start unified customer-facing `doso.v1` BaseGateway (:5052) in the SAME single process
     let gw_listener = TcpListener::bind(&args.gateway_listen).await?;
     let askme_cfg = args.askme_endpoint.as_ref().map(|ep| AskMeVoiceConfig {
         endpoint: ep.clone(),
         operator_id: "supervisor-1".into(),
         api_token: None,
-        robot_id: "xiaosuan-1".into(),
+        robot_id: args.device_id.clone(),
         timeout: Duration::from_secs(10),
     });
     let gw_cfg = BaseGatewayConfig {
@@ -503,7 +564,7 @@ async fn main() -> Result<()> {
         listen_addr: args.gateway_listen.clone(),
         robot_id: Some(args.device_id.clone()),
         robot_model: hw_params.robot_model.clone(),
-        firmware_version: args.firmware_version.clone(),
+        firmware_version: resolved_version.clone(),
         shm_enabled: args.shm_enabled,
         shm_proprio_name: args.shm_proprio_name.clone(),
         shm_cmd_name: args.shm_cmd_name.clone(),
@@ -522,17 +583,12 @@ async fn main() -> Result<()> {
     // 4. Start <10s Zero-Restart Policy Hot-Deploy & `/health` HTTP API (:5054)
     let admin_listener = TcpListener::bind(&args.admin_listen).await?;
     let admin_addr = admin_listener.local_addr()?;
-    let release_id = args
-        .release_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| args.firmware_version.clone());
     let hot_cfg = HotDeployConfig {
         packages_dir: Some(args.packages_dir.clone()),
         admin_token: args.admin_token.clone(),
         boot_id: boot_id.clone(),
-        version: args.firmware_version.clone(),
-        release_id,
+        version: resolved_version,
+        release_id: resolved_release_id,
         health_signing_key_path: args.health_signing_key.clone(),
     };
     let router = build_hot_deploy_router_with_config(shared.clone(), hot_cfg);

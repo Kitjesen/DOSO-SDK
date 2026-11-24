@@ -246,7 +246,16 @@ async fn single_process_rust_brainstem_e2e_and_sub_second_hot_deploy() {
     );
 
     // 7. Zero-Restart Hot-Deploy + off-lock 50-frame Shadow Mode zero-stall RT test
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Wait until the 200Hz ring buffer actually holds >= 55 frames (avoids Windows 15.6ms sleep quantum underfill).
+    let fill_deadline = Instant::now() + Duration::from_secs(5);
+    while shared.rt_tick_count.load(Ordering::Relaxed) < 55 {
+        assert!(
+            Instant::now() < fill_deadline,
+            "RT loop failed to accumulate 55 frames within 5s (got {})",
+            shared.rt_tick_count.load(Ordering::Relaxed)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     shared.reset_rt_metrics();
     let tele_before_flat = shared.telemetry.read().unwrap().clone();
 
@@ -847,4 +856,221 @@ async fn ota_health_auth_policy_persistence_and_local_status_13146() {
     admin_task.abort();
     ls_task.abort();
     let _ = std::fs::remove_dir_all(&tmp_root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rt_loop_200hz_walking_preserves_low_jitter_under_concurrent_health_and_telemetry_load() {
+    use doso_runtime::hardware::{HalBackend, HalDiagnostics};
+    use doso_runtime::server::{
+        build_hot_deploy_router_with_config, generate_boot_id, HotDeployConfig,
+    };
+    use doso_runtime::types::{MitCmd16, ProprioFrame, RemotePadState, WalkCommand};
+
+    let mut engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(true)),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    preload_packages(&mut engine, &packages_root()).unwrap();
+    engine.enable_motors().unwrap();
+    engine.stand_up().unwrap();
+    let mut sim_t = 10_000u64;
+    for _ in 0..=155 {
+        sim_t += 20_000;
+        engine.tick_sim(sim_t);
+    }
+    assert_eq!(
+        engine.safety.latched_fault(),
+        None,
+        "fault during stand_up! fsm={:?}",
+        engine.fsm_state()
+    );
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 0.4,
+            vy: 0.0,
+            yaw: 0.0,
+        })
+        .unwrap();
+
+    let shared = Arc::new(SharedBrain::new(engine));
+    let admin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let admin_addr = admin_listener.local_addr().unwrap();
+    let router = build_hot_deploy_router_with_config(
+        shared.clone(),
+        HotDeployConfig {
+            boot_id: generate_boot_id(),
+            version: "v0.0.2-rt".into(),
+            release_id: "rel-rt".into(),
+            ..HotDeployConfig::default()
+        },
+    );
+    let admin_task = tokio::spawn(async move {
+        let _ = axum::serve(admin_listener, router).await;
+    });
+
+    shared.reset_rt_metrics();
+    let stop = Arc::new(AtomicBool::new(false));
+    let rt_stop = stop.clone();
+    let rt_shared = shared.clone();
+    let rt_join = std::thread::spawn(move || {
+        let period = Duration::from_millis(5);
+        let mut next_deadline = Instant::now() + period;
+        let mut jitter_us = 0u64;
+        while !rt_stop.load(Ordering::Relaxed) {
+            let tick_start = Instant::now();
+            let now_us = rt_shared.now_us();
+            let mutex_wait_us = {
+                let mut g = rt_shared.engine.lock().unwrap();
+                let wait_us = tick_start.elapsed().as_micros() as u64;
+                g.tick_200hz(now_us);
+                rt_shared.refresh_telemetry(&g, now_us);
+                wait_us
+            };
+            let tick_us = tick_start.elapsed().as_micros() as u64;
+            rt_shared.record_rt_sample(mutex_wait_us, tick_us, jitter_us);
+
+            let before_sleep = Instant::now();
+            if next_deadline > before_sleep {
+                std::thread::sleep(next_deadline - before_sleep);
+                let wake = Instant::now();
+                jitter_us = wake.saturating_duration_since(next_deadline).as_micros() as u64;
+                next_deadline += period;
+                if next_deadline < wake {
+                    next_deadline = wake + period;
+                }
+            } else {
+                jitter_us = before_sleep
+                    .saturating_duration_since(next_deadline)
+                    .as_micros() as u64;
+                next_deadline = before_sleep + period;
+            }
+        }
+    });
+
+    // Hammer telemetry.read() + GET /health concurrently while 50Hz ONNX inference runs
+    let tele_hammer = {
+        let s = shared.clone();
+        let flag = stop.clone();
+        tokio::spawn(async move {
+            let mut reads = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let _snap = s.telemetry.read().unwrap().refresh_count;
+                reads += 1;
+                if reads.is_multiple_of(16) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            reads
+        })
+    };
+
+    let mut health_ok_count = 0u64;
+    for _ in 0..80 {
+        let (code, body) = admin_http("GET", admin_addr, "/health", None).await;
+        if code != 200 {
+            let fault = shared.engine.lock().unwrap().safety.latched_fault();
+            panic!("GET /health failed: {body}, fault={fault:?}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["imu_online"], true);
+        assert_eq!(v["online_joints"], 16);
+        health_ok_count += 1;
+        tokio::time::sleep(Duration::from_millis(8)).await;
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    rt_join.join().unwrap();
+    let tele_reads = tele_hammer.await.unwrap();
+    admin_task.abort();
+
+    let ticks = shared.rt_tick_count.load(Ordering::Relaxed);
+    let max_mutex_wait_us = shared.rt_mutex_wait_max_us.load(Ordering::Relaxed);
+    let max_tick_us = shared.rt_tick_max_us.load(Ordering::Relaxed);
+    let max_jitter_us = shared.rt_jitter_max_us.load(Ordering::Relaxed);
+    println!(
+        "RT_WALKING_STRESS_METRICS: ticks={ticks} health_requests={health_ok_count} tele_reads={tele_reads} max_mutex_wait_us={max_mutex_wait_us} max_tick_us={max_tick_us} max_jitter_us={max_jitter_us}"
+    );
+    // Windows default 15.6ms sleep quantum yields ~40-60 ticks in ~800ms; Linux hrtimer yields ~160+.
+    assert!(ticks >= 25, "expected >=25 RT ticks, got {ticks}");
+    assert!(
+        max_mutex_wait_us < 1_000,
+        "RT mutex contention too high under /health load: {max_mutex_wait_us} us"
+    );
+    assert!(
+        !shared.engine.lock().unwrap().has_critical_motor_fault(),
+        "unexpected safety fault during steady walking"
+    );
+
+    // Also verify resolve_release_metadata & socketcan liveness health gating
+    let tmp_rel = std::env::temp_dir().join(format!("doso-rel-meta-{}", generate_boot_id()));
+    let bin_dir = tmp_rel.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        tmp_rel.join("release.json"),
+        r#"{"version":"v0.0.2","release_id":"rel-20261124"}"#,
+    )
+    .unwrap();
+    let (ver, rel) = doso_runtime::server::resolve_release_metadata(
+        Some(&bin_dir.join("doso-brainstem")),
+        "v0.0.1",
+        None,
+    );
+    assert_eq!(ver, "v0.0.2");
+    assert_eq!(rel, "rel-20261124");
+    let _ = std::fs::remove_dir_all(&tmp_rel);
+
+    // Dead SocketCAN mock HAL (imu offline, 0 rx_frames) must fail /health with 503
+    struct DeadSocketCanMock;
+    impl HalBackend for DeadSocketCanMock {
+        fn name(&self) -> &'static str {
+            "socketcan-rdk-s100"
+        }
+        fn sample_proprio(&mut self, _now_us: u64) -> ProprioFrame {
+            ProprioFrame::default()
+        }
+        fn sample_remote(&mut self, _now_us: u64) -> RemotePadState {
+            RemotePadState::default()
+        }
+        fn set_tx_enabled(&mut self, _enabled: bool) {}
+        fn tx_enabled(&self) -> bool {
+            false
+        }
+        fn enable_motors(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn disable_motors(&mut self, _clear_errors: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn send_mit_verified(&mut self, _cmd: &MitCmd16) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn diagnostics(&self) -> HalDiagnostics {
+            HalDiagnostics {
+                backend_name: "socketcan-rdk-s100",
+                tx_enabled: false,
+                tx_frames: 0,
+                rx_frames: 0,
+                tx_dropped: 0,
+            }
+        }
+    }
+    let mut dead_engine = BrainEngine::new(Box::new(DeadSocketCanMock), SafetyConfig::default());
+    preload_packages(&mut dead_engine, &packages_root()).unwrap();
+    let dead_shared = Arc::new(SharedBrain::new(dead_engine));
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead_listener.local_addr().unwrap();
+    let dead_router = build_hot_deploy_router_with_config(dead_shared, HotDeployConfig::default());
+    let dead_task = tokio::spawn(async move {
+        let _ = axum::serve(dead_listener, dead_router).await;
+    });
+    let (dead_code, dead_body) = admin_http("GET", dead_addr, "/health", None).await;
+    assert_eq!(
+        dead_code, 503,
+        "dead socketcan /health should be 503: {dead_body}"
+    );
+    dead_task.abort();
 }

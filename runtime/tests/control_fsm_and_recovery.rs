@@ -750,3 +750,234 @@ fn snapshot_for_shadow_preserves_chronological_frames_and_matches_off_lock_eval(
     assert_eq!(off_lock.total_clipped_joints, in_lock.total_clipped_joints);
     assert!((off_lock.max_leg_step_delta_rad - in_lock.max_leg_step_delta_rad).abs() < 1e-12);
 }
+
+#[test]
+fn standing_gesture_and_external_enforce_joint_bounds_and_external_timeout_soft_damps() {
+    let mock_state = Arc::new(Mutex::new(SharedMockState::default()));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    // 1. Out-of-envelope ExternalControl frame must be rejected cleanly
+    let mut now_us = 10_000u64;
+    engine.external_enter("ext-safe-1", now_us).unwrap();
+    engine.external_enable_motors().unwrap();
+    let mut oob_cmd = MitCmd16::default();
+    oob_cmd.0[0].q = 2.5; // > hip limit 0.39 rad (would pass raw 12.57 motor limit)
+    oob_cmd.0[0].kp = 80.0;
+    oob_cmd.0[0].kd = 6.0;
+    assert!(engine.external_submit_frame(1, oob_cmd, now_us).is_err());
+
+    // 2. Valid standing pose passes ExternalControl, and 500ms timeout enters soft Damping
+    //    before disabling motors (never drops straight to Grounded while motors enabled)
+    let stand = RobotHardwareParams::thunder_v4().posture.standing_pose;
+    let valid_cmd = MitCmd16(std::array::from_fn(|i| {
+        if i < 12 {
+            doso_runtime::types::MitTarget::leg_pd(stand[i], 60.0, 6.0)
+        } else {
+            doso_runtime::types::MitTarget::wheel_vel(0.0, 1.0)
+        }
+    }));
+    engine
+        .external_submit_frame(1, valid_cmd, now_us)
+        .expect("valid standing-envelope frame must pass");
+    engine.tick_200hz(now_us);
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::External);
+
+    // Timeout (> 500_000 us) enters Damping with motors still enabled during soft ramp-down
+    now_us += 600_000;
+    engine.tick_200hz(now_us);
+    let snap_damp = engine.status_snapshot(now_us);
+    assert_eq!(snap_damp.fsm_state, FsmState::Damping);
+    assert!(snap_damp.motor_output_enabled);
+
+    // Finish damping settle (29+ 50Hz ticks): settles into Grounded and disables motors
+    for _ in 0..35 {
+        for _ in 0..4 {
+            now_us += 5_000;
+            engine.tick_200hz(now_us);
+        }
+    }
+    let snap_done = engine.status_snapshot(now_us);
+    assert_eq!(snap_done.fsm_state, FsmState::Grounded);
+    assert!(!snap_done.motor_output_enabled);
+
+    // 3. Standing / Gesture also reject injected NaN or out-of-envelope commands via SafetyGate
+    engine.enable_motors().unwrap();
+    engine.stand_up().unwrap();
+    for _ in 0..160 {
+        for _ in 0..4 {
+            now_us += 5_000;
+            engine.tick_200hz(now_us);
+        }
+    }
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Standing);
+    assert!(engine.safety.motor_output_enabled());
+}
+
+#[test]
+fn joystick_idle_does_not_preempt_and_release_immediately_stops_walking() {
+    let mut mapper = doso_runtime::arbiter::JoystickPadMapper::new();
+    mapper.mark_connected(1_000);
+    assert!(
+        !mapper.sample(2_000).active,
+        "idle connected gamepad must not claim active ownership"
+    );
+
+    let mock_state = Arc::new(Mutex::new(SharedMockState::default()));
+    let mut engine = BrainEngine::new(
+        Box::new(ControllableHal::new(true, mock_state.clone())),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+    engine.enable_motors().unwrap();
+
+    // Even with a connected idle pad (active=false), SDK damp() succeeds
+    let mut now_us = 10_000u64;
+    engine.tick_200hz(now_us);
+    assert_eq!(
+        engine.status_snapshot(now_us).source_owner,
+        ControlOwner::None
+    );
+
+    // Drive forward via pad, then drop pad.active=false -> immediate Walking -> Standing stop
+    mock_state.lock().unwrap().pad = RemotePadState {
+        active: true,
+        l1: true,
+        ..RemotePadState::default()
+    };
+    now_us += 5_000;
+    engine.tick_200hz(now_us);
+    mock_state.lock().unwrap().pad.l1 = false;
+    for _ in 0..(155 * 4) {
+        now_us += 5_000;
+        engine.tick_200hz(now_us);
+    }
+    mock_state.lock().unwrap().pad.ly = 0.6;
+    for _ in 0..4 {
+        now_us += 5_000;
+        engine.tick_200hz(now_us);
+    }
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Walking);
+
+    mock_state.lock().unwrap().pad = RemotePadState::default();
+    now_us += 5_000;
+    engine.tick_200hz(now_us);
+    assert_eq!(
+        engine.status_snapshot(now_us).fsm_state,
+        FsmState::Standing,
+        "releasing remote active flag must zero walk velocity immediately"
+    );
+    assert!(engine.walk_command().is_zero());
+
+    // Simulate lease expiry then SDK damp() must succeed without Yunzhuo lockup
+    now_us += 500_000;
+    engine.tick_200hz(now_us);
+    engine
+        .damp()
+        .expect("SDK damp must succeed once remote is idle");
+    assert_eq!(engine.status_snapshot(now_us).fsm_state, FsmState::Damping);
+}
+
+#[test]
+fn recovery_enable_enables_motors_and_rejects_cleanly_when_disallowed() {
+    let mut denied_engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(false)),
+        SafetyConfig {
+            allow_motor_enable: false,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut denied_engine);
+    let tok_denied = denied_engine
+        .recovery
+        .enter("op-deny", true, 1_000)
+        .unwrap();
+    assert!(denied_engine.recovery_enable(&tok_denied, 2_000).is_err());
+    assert_eq!(denied_engine.recovery.phase(), RecoveryPhase::Preparing);
+    assert!(!denied_engine.safety.motor_output_enabled());
+
+    let mut ok_engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(true)),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut ok_engine);
+    let tok_ok = ok_engine.recovery.enter("op-ok", true, 1_000).unwrap();
+    ok_engine.recovery_enable(&tok_ok, 2_000).unwrap();
+    assert_eq!(ok_engine.recovery.phase(), RecoveryPhase::Waiting);
+    assert!(ok_engine.safety.motor_output_enabled());
+}
+
+#[test]
+fn fsm_guards_require_enabled_online_proprio_and_clear_fault_resets_grounded() {
+    struct OfflineSocketCanHal(BenchNullHal);
+    impl HalBackend for OfflineSocketCanHal {
+        fn name(&self) -> &'static str {
+            "socketcan-rdk-s100"
+        }
+        fn sample_proprio(&mut self, now_us: u64) -> ProprioFrame {
+            let mut p = self.0.sample_proprio(now_us);
+            p.imu.online = false;
+            p
+        }
+        fn sample_remote(&mut self, now_us: u64) -> RemotePadState {
+            self.0.sample_remote(now_us)
+        }
+        fn set_tx_enabled(&mut self, enabled: bool) {
+            self.0.set_tx_enabled(enabled);
+        }
+        fn tx_enabled(&self) -> bool {
+            self.0.tx_enabled()
+        }
+        fn enable_motors(&mut self) -> Result<()> {
+            self.0.enable_motors()
+        }
+        fn disable_motors(&mut self, clear_errors: bool) -> Result<()> {
+            self.0.disable_motors(clear_errors)
+        }
+        fn send_mit_verified(&mut self, cmd: &MitCmd16) -> Result<()> {
+            self.0.send_mit_verified(cmd)
+        }
+        fn diagnostics(&self) -> HalDiagnostics {
+            self.0.diagnostics()
+        }
+    }
+
+    let mut engine = BrainEngine::new(
+        Box::new(OfflineSocketCanHal(BenchNullHal::new(true))),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    // 1. stand_up rejected when motors disabled
+    assert!(engine.stand_up().is_err());
+
+    // 2. stand_up rejected when motors enabled but IMU/proprio is offline on socketcan
+    engine.enable_motors().unwrap();
+    engine.tick_200hz(10_000);
+    assert!(engine.stand_up().is_err());
+
+    // 3. external_enter moves to External where Grounded enable_motors fails, clear_motor_fault resets Grounded
+    engine.disable_motors(false).unwrap();
+    engine.external_enter("ext-guard-1", 20_000).unwrap();
+    assert!(engine.enable_motors().is_err());
+    engine.external_enable_motors().unwrap();
+    assert!(engine.safety.motor_output_enabled());
+    engine.clear_motor_fault().unwrap();
+    assert_eq!(engine.fsm_state(), FsmState::Grounded);
+    assert!(!engine.safety.motor_output_enabled());
+}

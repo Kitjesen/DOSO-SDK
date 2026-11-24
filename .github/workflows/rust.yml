@@ -44,7 +44,9 @@ jobs:
         run: cargo test --workspace --examples --locked
 
       - name: Test Android Rust bridge on host
-        run: cargo test --manifest-path android/Cargo.toml --locked
+        run: |
+          cargo clippy --manifest-path android/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path android/Cargo.toml --locked
 
       - name: Test POSIX/Win32 SHM IPC crate
         run: |
@@ -61,8 +63,16 @@ jobs:
           cargo clippy --manifest-path rl/doso-rl-runner/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path rl/doso-rl-runner/Cargo.toml -- --test-threads=1
 
-      - name: Build C/Python FFI shared library
-        run: cargo build --manifest-path ffi/Cargo.toml
+      - name: Build & test C/Python FFI shared library
+        run: |
+          cargo build --manifest-path ffi/Cargo.toml
+          cargo clippy --manifest-path ffi/Cargo.toml --all-targets --features test-mock -- -D warnings
+          cargo test --manifest-path ffi/Cargo.toml --features test-mock
+
+      - name: Test Python SDK against FFI mock server
+        run: |
+          cargo build --manifest-path ffi/Cargo.toml --features test-mock
+          python -c "import os, pathlib, subprocess, sys; lib = (pathlib.Path('ffi/target/debug') / ('doso_sdk_ffi.dll' if sys.platform == 'win32' else 'libdoso_sdk_ffi.so')).resolve(); env = {**os.environ, 'DOSO_SDK_FFI_PATH': str(lib)}; subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests'], env=env, check=True)"
 
       - name: Test Rust Brainstem runtime (all crates + 4-model ONNX Golden + Hot-Deploy E2E)
         run: |

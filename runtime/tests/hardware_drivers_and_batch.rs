@@ -412,3 +412,21 @@ fn socketcan_core_encode_mit_cmd_by_leg_respects_safety_gates_and_matches_flat_e
     // 16 initial + 16 active + 64 burst = 96 ingested frames
     assert_eq!(core.rx_frames(), 96);
 }
+
+#[test]
+fn parse_can_ifaces_override_validates_four_comma_separated_interfaces() {
+    use doso_runtime::hardware::parse_can_ifaces_override;
+
+    assert_eq!(
+        parse_can_ifaces_override("can0, can1,can2 , can3"),
+        Some([
+            "can0".to_string(),
+            "can1".to_string(),
+            "can2".to_string(),
+            "can3".to_string(),
+        ])
+    );
+    assert_eq!(parse_can_ifaces_override("can0,can1,can2"), None);
+    assert_eq!(parse_can_ifaces_override("can0,can1,can2,can3,can4"), None);
+    assert_eq!(parse_can_ifaces_override("can0,,can2,can3"), None);
+}

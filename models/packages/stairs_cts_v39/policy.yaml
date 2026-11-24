@@ -5,6 +5,7 @@ robot: thunder_v4
 joint_order: thunder_leg_major
 model:
   file: "../../thunder_cts_moe_v39_model61128_static_b1_arm64.onnx"
+  sha256: "d076b543e967e2f46bb80a4b52581252b76dd6e104f496cb6fe5398594f0050a"
 inputs:
   - { tensor: history, history: { length: 10, layout: term_major }, clip: [-100.0, 100.0], obs: [ang_vel, gravity, cmd_vel, dof_pos_12, dof_vel_16, last_action] }
   - { tensor: single_obs, clip: [-100.0, 100.0], obs: [ang_vel, gravity, cmd_vel, dof_pos_12, dof_vel_16, last_action] }

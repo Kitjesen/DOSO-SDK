@@ -60,6 +60,17 @@ pub fn partition_mit_cmd_by_leg(cmd: &MitCmd16) -> Result<[LegCanBatch; 4]> {
     partition_mit_cmd_by_leg_with_params(cmd, RobotHardwareParams::thunder_v4())
 }
 
+/// Parses a comma-separated `DOSO_CAN_IFACES` override (`fr,fl,rr,rl`) into 4 non-empty interface names.
+pub fn parse_can_ifaces_override(raw: &str) -> Option<[String; 4]> {
+    let parts: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    parts.try_into().ok()
+}
+
 /// Builds the canonical 84-frame Thunder CAN bringup sequence with an explicit wheel CAN timeout:
 /// 1. `disable_all(false)` across `FR/FL/RR/RL` `can_id = 1..=4` (16 frames)
 /// 2. `disable_all(true)` (clear faults) across `FR/FL/RR/RL` `can_id = 1..=4` (16 frames)
@@ -493,11 +504,22 @@ mod linux_hal {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| fallback.to_string())
             };
+            let base_ifaces = std::env::var("DOSO_CAN_IFACES")
+                .ok()
+                .and_then(|raw| super::parse_can_ifaces_override(&raw))
+                .unwrap_or_else(|| {
+                    [
+                        params.can_buses.fr.clone(),
+                        params.can_buses.fl.clone(),
+                        params.can_buses.rr.clone(),
+                        params.can_buses.rl.clone(),
+                    ]
+                });
             let ifaces = [
-                env_or("DOSO_CAN_FR", &params.can_buses.fr),
-                env_or("DOSO_CAN_FL", &params.can_buses.fl),
-                env_or("DOSO_CAN_RR", &params.can_buses.rr),
-                env_or("DOSO_CAN_RL", &params.can_buses.rl),
+                env_or("DOSO_CAN_FR", &base_ifaces[0]),
+                env_or("DOSO_CAN_FL", &base_ifaces[1]),
+                env_or("DOSO_CAN_RR", &base_ifaces[2]),
+                env_or("DOSO_CAN_RL", &base_ifaces[3]),
             ];
 
             let mut fds = [-1i32; 4];

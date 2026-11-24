@@ -13,6 +13,7 @@ WatchdogSec=3s
 User=sunrise
 Group=sunrise
 WorkingDirectory=/opt/doso/current
+EnvironmentFile=-/etc/doso/robot-cloud/agent/agent.env
 EnvironmentFile=-/etc/doso/brainstem.env
 ExecStart=/opt/doso/current/bin/doso-brainstem
 Restart=on-failure

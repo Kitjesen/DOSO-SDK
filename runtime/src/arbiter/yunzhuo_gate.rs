@@ -666,17 +666,25 @@ impl JoystickPadMapper {
         let rx = (dz(self.axes[3]) * scale).clamp(-1.0, 1.0);
         let ry = (-dz(self.axes[4]) * scale).clamp(-1.0, 1.0);
 
+        let l1 = self.buttons[0] || self.buttons[4];
+        let l2 = self.buttons[2];
+        let r1 = self.buttons[5];
+        let r2 = self.buttons[7];
+        let damp_btn = self.buttons[1];
+        let active =
+            lx != 0.0 || ly != 0.0 || rx != 0.0 || ry != 0.0 || l1 || l2 || r1 || r2 || damp_btn;
+
         RemotePadState {
-            active: true,
+            active,
             lx,
             ly,
             rx,
             ry,
-            l1: self.buttons[0] || self.buttons[4],
-            l2: self.buttons[2],
-            r1: self.buttons[5],
-            r2: self.buttons[7],
-            damp_btn: self.buttons[1],
+            l1,
+            l2,
+            r1,
+            r2,
+            damp_btn,
             timestamp_us: now_us,
         }
     }
