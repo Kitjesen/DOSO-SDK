@@ -1,12 +1,17 @@
 use doso_runtime::hardware::robostride::{
-    RawCanFrame, RsDataFrame, RsEvent, RsKey, DEFAULT_HOST_ID,
+    cantimeout_ticks_to_us, cantimeout_us_to_ticks, decode_compressed_error_names,
+    decode_fault_bits_32_names, decode_rs_frame, decode_warning_bits_32_names, epscan_ms_to_raw,
+    epscan_raw_to_ms, RawCanFrame, RsBaudRate, RsDataFrame, RsDecodedState, RsEvent, RsKey,
+    RsParamType, RsParamValue, RsProtocol, RsRunMode, DEFAULT_HOST_ID,
 };
 use doso_runtime::hardware::{
-    build_can_startup_frames, build_leg_set_zero_frames, parse_imu_baud, partition_mit_cmd_by_leg,
-    BenchNullHal, HalBackend, ImuSerialState, SocketCanCore, MOTORS_PER_LEG, RX_MMSG_BATCH,
+    build_all_set_zero_frames, build_can_startup_frames, build_leg_set_zero_frames, parse_imu_baud,
+    partition_mit_cmd_by_leg, BenchNullHal, HalBackend, ImuSerialState, SocketCanCore,
+    MOTORS_PER_LEG, RX_MMSG_BATCH,
 };
 use doso_runtime::params::{
-    flat_index_to_leg_can, leg_can_to_flat_index, LegId, RobotHardwareParams, NUM_JOINTS,
+    flat_index_to_leg_can, leg_can_to_flat_index, LegId, MotorModel, RobotHardwareParams,
+    NUM_JOINTS,
 };
 use doso_runtime::types::{MitCmd16, MitTarget};
 
@@ -91,8 +96,8 @@ fn set_zero_encoding_matches_dart_robo_device_proto_bit_exact() {
 #[test]
 fn can_startup_sequence_frame_count_and_order_match_thunder_dart() {
     let frames = build_can_startup_frames().unwrap();
-    // 16 disable(false) + 16 disable(true) + 4 set_cantimeout_us(4, 500_000) + 3*16 set_reporting(true) = 84
-    assert_eq!(frames.len(), 84);
+    // 16 disable(false) + 16 disable(true) + 16 set_run_mode(Control) + 4 set_cantimeout_us(4, 500_000) + 3*16 set_reporting(true) = 100
+    assert_eq!(frames.len(), 100);
 
     let mut cursor = 0usize;
     for leg in LegId::ALL {
@@ -111,6 +116,18 @@ fn can_startup_sequence_frame_count_and_order_match_thunder_dart() {
             assert_eq!(
                 frames[cursor].frame,
                 RsEvent::disable(can_id, true).encode().unwrap()
+            );
+            cursor += 1;
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            assert_eq!(frames[cursor].leg, leg);
+            assert_eq!(
+                frames[cursor].frame,
+                RsEvent::set_run_mode(can_id, RsRunMode::Control)
+                    .encode()
+                    .unwrap()
             );
             cursor += 1;
         }
@@ -135,15 +152,15 @@ fn can_startup_sequence_frame_count_and_order_match_thunder_dart() {
             }
         }
     }
-    assert_eq!(cursor, 84);
+    assert_eq!(cursor, 100);
 
     // Custom wheel_can_timeout_us from RobotHardwareParams propagates into startup frames
     let mut custom = RobotHardwareParams::thunder_v4().clone();
     custom.safety.wheel_can_timeout_us = 250_000;
     let (_core, custom_startup) = SocketCanCore::with_hardware_params(&custom, true).unwrap();
-    assert_eq!(custom_startup.len(), 84);
+    assert_eq!(custom_startup.len(), 100);
     assert_eq!(
-        custom_startup[32].frame,
+        custom_startup[48].frame,
         RsEvent::set_cantimeout_us(4, 250_000).encode().unwrap()
     );
 }
@@ -156,18 +173,40 @@ fn verified_disable_vbus_polling_fault_decode_and_set_zero_gates() {
     assert!(passive.motor_disable_confirmed());
     assert!(passive.calibrate_set_zero().is_err());
 
-    // Active mode (`tx_enabled = true`) emits all 84 startup frames
+    // Active mode (`tx_enabled = true`) emits all 100 startup frames
     let (mut core, startup) = SocketCanCore::new(true).unwrap();
-    assert_eq!(startup.len(), 84);
+    assert_eq!(startup.len(), 100);
     assert!(core.motor_disable_confirmed());
 
-    // Bring all 16 motors online in reset status (0), verify calibrate_set_zero succeeds while disabled
+    // Bring all 16 motors online in reset status (0), verify calibrate_set_zero emits 48 persistent frames
     for idx in 0..NUM_JOINTS {
         let (leg, can_id) = flat_index_to_leg_can(idx).unwrap();
         core.ingest_rx_frame(leg, make_motion_report_frame(can_id, 0, 0), 10_000);
     }
     let zero_frames = core.calibrate_set_zero().unwrap();
-    assert_eq!(zero_frames.len(), 12);
+    assert_eq!(zero_frames.len(), 48);
+    assert_eq!(zero_frames[0].frame, RsEvent::set_zero(1).encode().unwrap());
+    assert_eq!(
+        zero_frames[16].frame,
+        RsEvent::set_zero_sta(1, true).encode().unwrap()
+    );
+    assert_eq!(
+        zero_frames[32].frame,
+        RsEvent::save_data(1).encode().unwrap()
+    );
+
+    // Inject GetVersion reply on FR thigh (can_id = 2, flat_idx = 1) and confirm it does not clobber joint angle q
+    let q_before = core.joints()[1].q;
+    let ver_rx = RsDataFrame {
+        mode: 0x02,
+        data2: 2,
+        can_id: DEFAULT_HOST_ID,
+        data1: [0x00, 0xC4, 0x56, 0, 4, 1, 38, 0],
+    }
+    .to_can_frame();
+    core.ingest_rx_frame(LegId::Fr, ver_rx, 15_000);
+    assert_eq!(core.firmware_versions()[1], Some([0, 4, 1, 38]));
+    assert_eq!(core.joints()[1].q, q_before);
 
     // Enable motors -> status_code becomes 2 (`RSStatus.motor`)
     let enable_tx = core.enable_motors().unwrap();
@@ -429,4 +468,253 @@ fn parse_can_ifaces_override_validates_four_comma_separated_interfaces() {
     assert_eq!(parse_can_ifaces_override("can0,can1,can2"), None);
     assert_eq!(parse_can_ifaces_override("can0,can1,can2,can3,can4"), None);
     assert_eq!(parse_can_ifaces_override("can0,,can2,can3"), None);
+}
+
+#[test]
+fn all_set_zero_48_frame_sequence_is_exact() {
+    let frames = build_all_set_zero_frames().unwrap();
+    assert_eq!(frames.len(), 48);
+
+    let mut cursor = 0usize;
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            assert_eq!(frames[cursor].leg, leg);
+            assert_eq!(
+                frames[cursor].frame,
+                RsEvent::set_zero(can_id).encode().unwrap()
+            );
+            cursor += 1;
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            assert_eq!(frames[cursor].leg, leg);
+            assert_eq!(
+                frames[cursor].frame,
+                RsEvent::set_zero_sta(can_id, true).encode().unwrap()
+            );
+            cursor += 1;
+        }
+    }
+    for leg in LegId::ALL {
+        for can_id in 1..=4 {
+            assert_eq!(frames[cursor].leg, leg);
+            assert_eq!(
+                frames[cursor].frame,
+                RsEvent::save_data(can_id).encode().unwrap()
+            );
+            cursor += 1;
+        }
+    }
+    assert_eq!(cursor, 48);
+}
+
+#[test]
+fn robostride_2026_keys_complete_roundtrip_and_value_parsing() {
+    assert_eq!(RsKey::ALL.len(), 29);
+    for key in RsKey::ALL {
+        let code = key as u16;
+        assert_eq!(RsKey::from_u16(code), Some(key));
+        assert_eq!(RsKey::parse_name_or_hex(key.name()), Some(key));
+        let hex = format!("0x{code:04x}");
+        assert_eq!(RsKey::parse_name_or_hex(&hex), Some(key));
+
+        let sample = match key.value_type() {
+            RsParamType::U8 => key.parse_value_str("1").unwrap(),
+            RsParamType::U16 => key.parse_value_str("3").unwrap(),
+            RsParamType::U32 => key.parse_value_str("20000").unwrap(),
+            RsParamType::F32 => key.parse_value_str("12.5").unwrap(),
+        };
+        let mut bytes4 = [0u8; 4];
+        sample.write_le_bytes(&mut bytes4);
+        assert_eq!(key.decode_value(bytes4), sample);
+        assert!(!sample.format_for_key(key).is_empty());
+    }
+
+    assert!(!RsKey::MechPos.is_writable());
+    assert!(!RsKey::Iqf.is_writable());
+    assert!(!RsKey::MechVel.is_writable());
+    assert!(!RsKey::Vbus.is_writable());
+    assert!(RsKey::ZeroSta.is_writable());
+    assert!(RsKey::RunMode.is_writable());
+
+    assert_eq!(epscan_raw_to_ms(0), 10);
+    assert_eq!(epscan_raw_to_ms(1), 10);
+    assert_eq!(epscan_raw_to_ms(2), 15);
+    assert_eq!(epscan_ms_to_raw(10), 1);
+    assert_eq!(epscan_ms_to_raw(25), 4);
+    assert_eq!(cantimeout_us_to_ticks(1_000_000), 20_000);
+    assert_eq!(cantimeout_ticks_to_us(20_000), 1_000_000);
+}
+
+#[test]
+fn robostride_2026_events_and_decoded_states() {
+    // Wire encodings for Communication Types 0, 5, 7, 17, 18, 22, 23, 25, 26
+    let get_id = RsEvent::get_device_id(127).encode().unwrap();
+    assert_eq!(get_id.id, (DEFAULT_HOST_ID as u32) << 8 | 127);
+
+    let cal = RsEvent::calibration(2).encode().unwrap();
+    assert_eq!(cal.id, (0x05 << 24) | (0x00FD << 8) | 2);
+
+    let set_id = RsEvent::set_id(127, 3).encode().unwrap();
+    assert_eq!(
+        set_id.id,
+        (0x07 << 24) | ((3u32) << 16) | ((DEFAULT_HOST_ID as u32) << 8) | 127
+    );
+
+    let save = RsEvent::save_data(4).encode().unwrap();
+    assert_eq!(save.id, (0x16 << 24) | ((DEFAULT_HOST_ID as u32) << 8) | 4);
+    assert_eq!(save.data, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let baud = RsEvent::set_baud_rate(1, RsBaudRate::Rate500K)
+        .encode()
+        .unwrap();
+    assert_eq!(baud.id, (0x17 << 24) | ((DEFAULT_HOST_ID as u32) << 8) | 1);
+    assert_eq!(baud.data, [1, 2, 3, 4, 5, 6, 2, 0]);
+
+    let proto = RsEvent::set_protocol(1, RsProtocol::Private)
+        .encode()
+        .unwrap();
+    assert_eq!(proto.id, (0x19 << 24) | ((DEFAULT_HOST_ID as u32) << 8) | 1);
+    assert_eq!(proto.data, [1, 2, 3, 4, 5, 6, 0, 0]);
+
+    let ver = RsEvent::get_version(2).encode().unwrap();
+    assert_eq!(ver.id, (0x04 << 24) | ((DEFAULT_HOST_ID as u32) << 8) | 2);
+    assert_eq!(ver.data, [0x00, 0xC4, 0, 0, 0, 0, 0, 0]);
+
+    // Type-18 validation: read-only & wrong type rejected; valid writes encode little-endian
+    assert!(RsEvent::set_param(1, RsKey::Vbus, RsParamValue::F32(48.0))
+        .encode()
+        .is_err());
+    assert!(
+        RsEvent::set_param(1, RsKey::ZeroSta, RsParamValue::F32(1.0))
+            .encode()
+            .is_err()
+    );
+    let zero_sta = RsEvent::set_zero_sta(3, true).encode().unwrap();
+    assert_eq!(zero_sta.data[0..2], [0x29, 0x70]);
+    assert_eq!(zero_sta.data[4..8], [1, 0, 0, 0]);
+
+    let epscan = RsEvent::set_epscan_time_ms(1, 20).encode().unwrap();
+    assert_eq!(epscan.data[0..2], [0x26, 0x70]);
+    assert_eq!(epscan.data[4..6], 3u16.to_le_bytes());
+
+    let damper = RsEvent::set_damper(1, true).encode().unwrap();
+    assert_eq!(damper.data[0..2], [0x2A, 0x70]);
+    assert_eq!(damper.data[4], 1);
+
+    let add_off = RsEvent::set_add_offset(2, 0.25).encode().unwrap();
+    assert_eq!(add_off.data[0..2], [0x2B, 0x70]);
+    assert_eq!(add_off.data[4..8], 0.25f32.to_le_bytes());
+
+    // Factory default CAN ID 127 allowed with explicit limits
+    let rs04_limits = RobotHardwareParams::thunder_v4().motors.rs04;
+    let bench_ctrl = RsEvent::Control {
+        can_id: 127,
+        torque: 0.0,
+        position: 0.0,
+        velocity: 0.0,
+        kp: 0.0,
+        kd: 0.0,
+    };
+    assert!(bench_ctrl.encode().is_err());
+    assert!(bench_ctrl.encode_with_limits(Some(rs04_limits)).is_ok());
+
+    // Decode Type 0 DeviceId
+    let dev_raw = RsDataFrame {
+        mode: 0x00,
+        data2: 2,
+        can_id: 0xFE,
+        data1: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+    }
+    .to_can_frame();
+    let RsDecodedState::DeviceId(dev) = decode_rs_frame(dev_raw).unwrap() else {
+        panic!("expected DeviceId");
+    };
+    assert_eq!(dev.can_id, 2);
+    assert_eq!(dev.mcu_hex(), "0102030405060708");
+    assert_eq!(dev.mcu_dart_decimal(), "102030405060708");
+    assert!(dev.matches_expected("0x0102030405060708"));
+
+    // Decode Type 26 Version response BEFORE Motion decoding (critical disambiguation!)
+    let ver_raw = RsDataFrame {
+        mode: 0x02,
+        data2: ((2u16) << 14) | 127,
+        can_id: DEFAULT_HOST_ID,
+        data1: [0x00, 0xC4, 0x56, 0, 4, 1, 38, 0],
+    }
+    .to_can_frame();
+    let RsDecodedState::FirmwareVersion(v) = decode_rs_frame(ver_raw).unwrap() else {
+        panic!("expected FirmwareVersion, must not misparse as Motion");
+    };
+    assert_eq!(v.can_id, 127);
+    assert_eq!(v.display_string(), "0.4.1.38");
+    assert!(v.supports_modern_protocol(MotorModel::Rs04));
+    assert!(!RsFirmwareVersionAlias::old_rs04().supports_modern_protocol(MotorModel::Rs04));
+
+    // Decode Type 17 typed getter responses (U8 / U16 / U32 / F32)
+    let mut rm_data = [0u8; 8];
+    rm_data[0..2].copy_from_slice(&(RsKey::RunMode as u16).to_le_bytes());
+    rm_data[4] = 5;
+    let rm_raw = RsDataFrame {
+        mode: 0x11,
+        data2: 1,
+        can_id: DEFAULT_HOST_ID,
+        data1: rm_data,
+    }
+    .to_can_frame();
+    let RsDecodedState::Param { key, value, .. } = decode_rs_frame(rm_raw).unwrap() else {
+        panic!("expected Param");
+    };
+    assert_eq!(key, RsKey::RunMode);
+    assert_eq!(value, RsParamValue::U8(5));
+
+    // Decode Type 21 fault & warning bits
+    let mut f_data = [0u8; 8];
+    let f_bits = (1u32 << 3) | (1u32 << 14) | (1u32 << 16);
+    let w_bits = 1u32;
+    f_data[0..4].copy_from_slice(&f_bits.to_le_bytes());
+    f_data[4..8].copy_from_slice(&w_bits.to_le_bytes());
+    let f_raw = RsDataFrame {
+        mode: 0x15,
+        data2: 2,
+        can_id: DEFAULT_HOST_ID,
+        data1: f_data,
+    }
+    .to_can_frame();
+    let RsDecodedState::FaultFrame {
+        fault_bits,
+        warning_bits,
+        ..
+    } = decode_rs_frame(f_raw).unwrap()
+    else {
+        panic!("expected FaultFrame");
+    };
+    assert_eq!(fault_bits, f_bits);
+    assert_eq!(warning_bits, w_bits);
+    assert_eq!(
+        decode_fault_bits_32_names(fault_bits),
+        vec!["overVoltage", "stallOverload", "phaseAOverCurrent"]
+    );
+    assert_eq!(
+        decode_warning_bits_32_names(warning_bits),
+        vec!["overTemperatureWarning"]
+    );
+    assert_eq!(
+        decode_compressed_error_names(0b10_0101),
+        vec!["underVoltage", "overTemperature", "uncalibrated"]
+    );
+}
+
+struct RsFirmwareVersionAlias;
+impl RsFirmwareVersionAlias {
+    const fn old_rs04() -> doso_runtime::hardware::robostride::RsFirmwareVersion {
+        doso_runtime::hardware::robostride::RsFirmwareVersion {
+            host_id: DEFAULT_HOST_ID,
+            can_id: 1,
+            status_code: 0,
+            error_bits: 0,
+            version: [0, 4, 0, 9],
+        }
+    }
 }
