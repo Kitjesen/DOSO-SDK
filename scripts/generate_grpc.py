@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lingtu", type=Path, required=True)
     args = parser.parse_args()
-    source = Path(__file__).resolve().parents[1] / "proto"
+    source = Path(__file__).resolve().parents[1] / "proto/doso"
     protos = sorted(source.rglob("*.proto"))
     target = args.lingtu.resolve() / "src/gateway/rpc/generated"
     if not (args.lingtu / "src/gateway/gateway_module.py").is_file():
@@ -57,7 +57,7 @@ def main():
         (target / package / "__init__.py").write_text(
             '"""Generated DOSO protocol bindings; do not edit by hand."""\n', encoding="utf-8"
         )
-    source = Path(__file__).resolve().parents[1] / "brainstem/protocol"
+    source = Path(__file__).resolve().parents[1] / "proto/brainstem"
     target = args.lingtu.resolve() / "src/runtime/adapters/brainstem/generated"
     target.mkdir(parents=True, exist_ok=True)
     subprocess.run(

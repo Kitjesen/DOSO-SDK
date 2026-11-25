@@ -119,8 +119,8 @@ class GenerationTest(unittest.TestCase):
             scripts = checkout / "scripts"
             scripts.mkdir(parents=True)
             shutil.copyfile(sdk / "scripts/generate_grpc.py", scripts / "generate_grpc.py")
-            shutil.copytree(sdk / "brainstem/protocol", checkout / "brainstem/protocol")
-            source = checkout / "proto"
+            shutil.copytree(sdk / "proto/brainstem", checkout / "proto/brainstem")
+            source = checkout / "proto/doso"
             (source / "messages").mkdir(parents=True)
             for name, text in {
                 "common.proto": 'import public "messages/common.proto";',

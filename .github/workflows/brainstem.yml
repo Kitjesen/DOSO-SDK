@@ -23,4 +23,4 @@ jobs:
             protobuf-compiler-grpc
 
       - name: Verify build, tests, install, and consumer
-        run: bash brainstem/scripts/verify.sh
+        run: bash bindings/brainstem-cpp/scripts/verify.sh

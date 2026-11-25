@@ -1,8 +1,0 @@
-# Pin 4 USB-CAN / gs_usb adapters to deterministic leg interfaces (FR=can0, RR=can1, FL=can2, RL=can3).
-# Fill KERNELS=="..." or ATTRS{serial}=="..." from `udevadm info -a -p /sys/class/net/can0` on the target robot,
-# then install to /etc/udev/rules.d/99-doso-can.rules and reload with `sudo udevadm control --reload-rules`.
-#
-# SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="1-1.1", NAME="can0"
-# SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="1-1.2", NAME="can1"
-# SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="1-2.1", NAME="can2"
-# SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="1-2.2", NAME="can3"

@@ -4,12 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[workspace]
-
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-doso-sdk = { path = "../.." }
+doso-sdk = { path = "../../doso-sdk" }
 doso-shm-ipc = { path = "../../bridges/doso-shm-ipc" }
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -22,8 +20,3 @@ tracing-subscriber = "0.3"
 [dev-dependencies]
 prost-types = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-strip = "symbols"

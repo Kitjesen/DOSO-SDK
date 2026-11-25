@@ -373,9 +373,8 @@ impl OrtDynamicBackend {
             ) -> *mut OrtStatus = api.slot(SLOT_ENABLE_MEM_PATTERN);
             let _ = api.check(enable_mem_pattern(opts));
 
-            let enable_arena: unsafe extern "system" fn(
-                *mut OrtSessionOptions,
-            ) -> *mut OrtStatus = api.slot(SLOT_ENABLE_CPU_MEM_ARENA);
+            let enable_arena: unsafe extern "system" fn(*mut OrtSessionOptions) -> *mut OrtStatus =
+                api.slot(SLOT_ENABLE_CPU_MEM_ARENA);
             let _ = api.check(enable_arena(opts));
 
             let set_opt_level: unsafe extern "system" fn(

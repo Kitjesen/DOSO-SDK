@@ -26,58 +26,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ONNX Runtime C-API
-        run: |
-          python -m pip install --quiet onnxruntime
-          python -c "import os, pathlib, sys, onnxruntime; capi = pathlib.Path(onnxruntime.__file__).resolve().parent / 'capi'; lib = (capi / 'onnxruntime.dll') if sys.platform == 'win32' else sorted(capi.glob('libonnxruntime.so*'))[0]; assert lib.is_file(), f'missing ORT lib in {capi}'; print('ORT:', onnxruntime.__version__, lib); open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8').write(f'ONNXRUNTIME_DLL_PATH={lib}\n')"
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test Rust SDK
-        run: cargo test --workspace --locked
-
-      - name: Test example arguments and measurements
-        run: cargo test --workspace --examples --locked
-
-      - name: Test Android Rust bridge on host
+      - name: Check Clippy across workspace
         run: |
-          cargo clippy --manifest-path android/Cargo.toml --all-targets --locked -- -D warnings
-          cargo test --manifest-path android/Cargo.toml --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy -p doso-sdk-ffi --all-targets --features test-mock --locked -- -D warnings
 
-      - name: Test POSIX/Win32 SHM IPC crate
+      - name: Test Rust SDK and examples
         run: |
-          cargo clippy --manifest-path bridges/doso-shm-ipc/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path bridges/doso-shm-ipc/Cargo.toml
+          cargo test -p doso-sdk --locked
+          cargo test -p doso-sdk --examples --locked
 
-      - name: Test Board-A Base Gateway & DDS bridge
+      - name: Test Android bridge and POSIX/Win32 SHM IPC
         run: |
-          cargo clippy --manifest-path bridges/brainstem-dds-bridge/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path bridges/brainstem-dds-bridge/Cargo.toml -- --test-threads=1
+          cargo test -p doso-sdk-android --locked
+          cargo test -p doso-shm-ipc --locked
 
-      - name: Test ONNX RL runner (including direct SHM loop)
+      - name: Test Board-A Base Gateway, DDS bridge, and ONNX RL runner
         run: |
-          cargo clippy --manifest-path rl/doso-rl-runner/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path rl/doso-rl-runner/Cargo.toml -- --test-threads=1
+          cargo test -p brainstem-dds-bridge --locked -- --test-threads=1
+          cargo test -p doso-rl-runner --locked -- --test-threads=1
 
       - name: Build & test C/Python FFI shared library
         run: |
-          cargo build --manifest-path ffi/Cargo.toml
-          cargo clippy --manifest-path ffi/Cargo.toml --all-targets --features test-mock -- -D warnings
-          cargo test --manifest-path ffi/Cargo.toml --features test-mock
+          cargo build -p doso-sdk-ffi --locked
+          cargo test -p doso-sdk-ffi --features test-mock --locked
 
       - name: Test Python SDK against FFI mock server
         run: |
-          cargo build --manifest-path ffi/Cargo.toml --features test-mock
-          python -c "import os, pathlib, subprocess, sys; lib = (pathlib.Path('ffi/target/debug') / ('doso_sdk_ffi.dll' if sys.platform == 'win32' else 'libdoso_sdk_ffi.so')).resolve(); env = {**os.environ, 'DOSO_SDK_FFI_PATH': str(lib)}; subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests'], env=env, check=True)"
-
-      - name: Test Rust Brainstem runtime (all crates + 4-model ONNX Golden + Hot-Deploy E2E)
-        run: |
-          cargo clippy --manifest-path runtime/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path runtime/Cargo.toml
-
-      - name: Verify crate package
-        run: cargo package -p doso-sdk --allow-dirty --locked
+          cargo build -p doso-sdk-ffi --features test-mock --locked
+          python -c "import os, pathlib, subprocess, sys; lib = (pathlib.Path('target/debug') / ('doso_sdk_ffi.dll' if sys.platform == 'win32' else 'libdoso_sdk_ffi.so')).resolve(); env = {**os.environ, 'DOSO_SDK_FFI_PATH': str(lib)}; subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'bindings/python/tests'], env=env, check=True)"

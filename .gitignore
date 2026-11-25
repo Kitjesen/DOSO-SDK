@@ -15,8 +15,10 @@ __pycache__/
 /target/
 /.local/
 /.ruff_cache/
-/brainstem/build*/
-/brainstem/install*/
+/bindings/brainstem-cpp/build*/
+/bindings/brainstem-cpp/install*/
+/bindings/android/target/
+/bindings/ffi/target/
 /archive/python/build/
 /archive/python/dist/
 /archive/python/.pytest_cache/
