@@ -116,6 +116,7 @@ enum TransitionTask {
         total: usize,
         lower: [f64; NUM_JOINTS],
         upper: [f64; NUM_JOINTS],
+        pending_sit_down: bool,
     },
     SitDown {
         start: JointVec16,
@@ -564,30 +565,33 @@ impl BrainEngine {
         let target = JointVec16(pkg.graph.manifest().posture.standing_pose).discard_wheels();
         let counts = pkg.graph.manifest().posture.stand_up_counts;
         let start = self.latest_proprio.positions().discard_wheels();
+        self.begin_stand_up_from(start, target, counts, false);
+        Ok(())
+    }
+
+    fn begin_stand_up_from(
+        &mut self,
+        start: JointVec16,
+        target: JointVec16,
+        total: usize,
+        pending_sit_down: bool,
+    ) {
         let (lower, upper) = self.transition_leg_bounds(&start, &target);
         self.height.reset_handover();
+        self.walk_cmd = WalkCommand::default();
         self.fsm = FsmState::Transitioning;
         self.transition_task = Some(TransitionTask::StandUp {
             start,
             target,
             step: 0,
-            total: counts,
+            total,
             lower,
             upper,
+            pending_sit_down,
         });
-        Ok(())
     }
 
-    pub fn sit_down(&mut self) -> Result<()> {
-        if self.fsm != FsmState::Standing && self.fsm != FsmState::Walking {
-            bail!("SitDown requires Standing or Walking state");
-        }
-        let Some(pkg) = self.policies.active() else {
-            bail!("No active locomotion policy loaded");
-        };
-        let target = JointVec16(pkg.graph.manifest().posture.sitting_pose).discard_wheels();
-        let counts = pkg.graph.manifest().posture.sit_down_counts;
-        let start = self.latest_proprio.positions().discard_wheels();
+    fn begin_sit_down_from(&mut self, start: JointVec16, target: JointVec16, total: usize) {
         let (lower, upper) = self.transition_leg_bounds(&start, &target);
         self.walk_cmd = WalkCommand::default();
         self.fsm = FsmState::Transitioning;
@@ -595,10 +599,32 @@ impl BrainEngine {
             start,
             target,
             step: 0,
-            total: counts,
+            total,
             lower,
             upper,
         });
+    }
+
+    pub fn sit_down(&mut self) -> Result<()> {
+        let is_stand_up = self.fsm == FsmState::Transitioning
+            && matches!(self.transition_task, Some(TransitionTask::StandUp { .. }));
+        if self.fsm != FsmState::Standing && self.fsm != FsmState::Walking && !is_stand_up {
+            bail!("SitDown requires Standing, Walking, or active StandUp transition");
+        }
+        let posture = {
+            let Some(pkg) = self.policies.active() else {
+                bail!("No active locomotion policy loaded");
+            };
+            pkg.graph.manifest().posture.clone()
+        };
+        let start = self.latest_proprio.positions().discard_wheels();
+        if self.fsm == FsmState::Walking {
+            let standing_target = JointVec16(posture.standing_pose).discard_wheels();
+            self.begin_stand_up_from(start, standing_target, posture.stand_up_counts, true);
+        } else {
+            let sitting_target = JointVec16(posture.sitting_pose).discard_wheels();
+            self.begin_sit_down_from(start, sitting_target, posture.sit_down_counts);
+        }
         Ok(())
     }
 
@@ -758,7 +784,11 @@ impl BrainEngine {
                 self.enter_damp();
             } else if rising_l1 && self.fsm == FsmState::Grounded {
                 let _ = self.stand_up();
-            } else if rising_l2 && (self.fsm == FsmState::Standing || self.fsm == FsmState::Walking)
+            } else if rising_l2
+                && (self.fsm == FsmState::Standing
+                    || self.fsm == FsmState::Walking
+                    || (self.fsm == FsmState::Transitioning
+                        && matches!(self.transition_task, Some(TransitionTask::StandUp { .. }))))
             {
                 let _ = self.sit_down();
             } else if self.fsm == FsmState::Standing || self.fsm == FsmState::Walking {
@@ -927,6 +957,7 @@ impl BrainEngine {
                             total,
                             lower,
                             upper,
+                            pending_sit_down,
                         } => {
                             let t = if *total == 0 {
                                 1.0
@@ -946,7 +977,26 @@ impl BrainEngine {
                                 &cmd,
                             );
                             if *step >= *total {
-                                self.fsm = FsmState::Standing;
+                                if *pending_sit_down {
+                                    if let Some(posture) = self
+                                        .policies
+                                        .active()
+                                        .map(|pkg| pkg.graph.manifest().posture.clone())
+                                    {
+                                        let sit_target =
+                                            JointVec16(posture.sitting_pose).discard_wheels();
+                                        let sit_start = proprio.positions().discard_wheels();
+                                        self.begin_sit_down_from(
+                                            sit_start,
+                                            sit_target,
+                                            posture.sit_down_counts,
+                                        );
+                                    } else {
+                                        self.fsm = FsmState::Standing;
+                                    }
+                                } else {
+                                    self.fsm = FsmState::Standing;
+                                }
                             } else {
                                 *step += 1;
                                 self.transition_task = Some(task);

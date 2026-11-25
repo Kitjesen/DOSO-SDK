@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use doso_runtime::arbiter::ControlOwner;
-use doso_runtime::control::{BrainEngine, FsmState, RecoveryPhase, RecoveryRuntime, SpeedMode};
+use doso_runtime::control::{
+    BodyTransitionKind, BrainEngine, FsmState, RecoveryPhase, RecoveryRuntime, SpeedMode,
+};
 use doso_runtime::hardware::{BenchNullHal, HalBackend, HalDiagnostics};
 use doso_runtime::params::RobotHardwareParams;
 use doso_runtime::policy::{LoadedPolicyPackage, ShadowEvaluator};
@@ -980,4 +982,84 @@ fn fsm_guards_require_enabled_online_proprio_and_clear_fault_resets_grounded() {
     engine.clear_motor_fault().unwrap();
     assert_eq!(engine.fsm_state(), FsmState::Grounded);
     assert!(!engine.safety.motor_output_enabled());
+}
+
+#[test]
+fn sit_down_from_walking_stands_up_first_then_sits_down_and_interrupts_stand_up() {
+    let mut engine = BrainEngine::new(
+        Box::new(BenchNullHal::new(true)),
+        SafetyConfig {
+            allow_motor_enable: true,
+            ..SafetyConfig::default()
+        },
+    );
+    load_baseline_packages(&mut engine);
+
+    let mut now_us = 10_000u64;
+    let (stand_counts, sit_counts) = {
+        let p = &engine.policies.active().unwrap().graph.manifest().posture;
+        (p.stand_up_counts, p.sit_down_counts)
+    };
+
+    // 1. SitDown immediately interrupts active StandUp transition (matching cms.dart:259-268)
+    engine.enable_motors().unwrap();
+    engine.stand_up().unwrap();
+    for _ in 0..30 {
+        now_us += 20_000;
+        engine.tick_sim(now_us);
+    }
+    let mid = engine.status_snapshot(now_us);
+    assert_eq!(mid.fsm_state, FsmState::Transitioning);
+    assert_eq!(mid.transition, BodyTransitionKind::StandUp);
+
+    engine.sit_down().unwrap();
+    let interrupted = engine.status_snapshot(now_us);
+    assert_eq!(interrupted.fsm_state, FsmState::Transitioning);
+    assert_eq!(interrupted.transition, BodyTransitionKind::SitDown);
+    // Reject duplicate SitDown while already sitting down
+    assert!(engine.sit_down().is_err());
+
+    for _ in 0..=sit_counts {
+        now_us += 20_000;
+        engine.tick_sim(now_us);
+    }
+    assert_eq!(engine.fsm_state(), FsmState::Grounded);
+
+    // 2. SitDown while Walking first runs StandUp (pending SitDown), then chains SitDown -> Grounded (cms.dart:238-246 & 290-306)
+    engine.stand_up().unwrap();
+    for _ in 0..=stand_counts {
+        now_us += 20_000;
+        engine.tick_sim(now_us);
+    }
+    assert_eq!(engine.fsm_state(), FsmState::Standing);
+
+    engine
+        .set_walk_velocity(WalkCommand {
+            vx: 0.4,
+            vy: 0.0,
+            yaw: 0.0,
+        })
+        .unwrap();
+    assert_eq!(engine.fsm_state(), FsmState::Walking);
+
+    engine.sit_down().unwrap();
+    let st0 = engine.status_snapshot(now_us);
+    assert_eq!(st0.fsm_state, FsmState::Transitioning);
+    assert_eq!(st0.transition, BodyTransitionKind::StandUp);
+
+    // Complete StandUp phase (0..=stand_counts): must transition straight into SitDown (never settle in Standing)
+    for _ in 0..=stand_counts {
+        now_us += 20_000;
+        engine.tick_sim(now_us);
+    }
+    let st_chain = engine.status_snapshot(now_us);
+    assert_eq!(st_chain.fsm_state, FsmState::Transitioning);
+    assert_eq!(st_chain.transition, BodyTransitionKind::SitDown);
+
+    // Complete SitDown phase (0..=sit_counts): lands in Grounded
+    for _ in 0..=sit_counts {
+        now_us += 20_000;
+        engine.tick_sim(now_us);
+    }
+    assert_eq!(engine.fsm_state(), FsmState::Grounded);
 }
