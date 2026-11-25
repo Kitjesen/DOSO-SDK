@@ -869,10 +869,10 @@ pub unsafe extern "C" fn doso_shm_fnv1a_64(data: *const u8, len: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Arc;
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn unique_name(prefix: &str) -> String {
         let pid = std::process::id();
@@ -904,13 +904,44 @@ mod tests {
         let r2 = ProprioRingReader::open(&name).unwrap();
 
         let done = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(AtomicUsize::new(0));
         let done_r1 = done.clone();
         let done_r2 = done.clone();
+        let ready_r1 = ready.clone();
+        let ready_r2 = ready.clone();
+        let observed_r1 = observed.clone();
+        let observed_r2 = observed.clone();
 
-        let check_reader = |reader: ProprioRingReader, flag: Arc<AtomicBool>| {
+        let make_payload = |seq: u64| {
+            let mut p = DosoProprioPayload {
+                sequence: seq,
+                monotonic_us: seq * 100,
+                imu_quat_wxyz: [1.0, 0.0, 0.0, 0.0],
+                imu_gyro_rad_s: [0.01, -0.01, 0.02],
+                imu_accel_m_s2: [0.0, 0.0, 9.81 + seq as f64 * 1e-4],
+                joint_online_mask: 0xFFFF,
+                imu_fresh: 1,
+                cms_state: 2,
+                control_owner: 1,
+                motor_output_enabled: 1,
+                ..DosoProprioPayload::default()
+            };
+            for i in 0..DOSO_SHM_JOINTS {
+                p.joint_q[i] = seq as f64 + i as f64 * 0.01;
+                p.joint_tau[i] = -(seq as f64) * 0.5;
+            }
+            p
+        };
+
+        let check_reader = |reader: ProprioRingReader,
+                            flag: Arc<AtomicBool>,
+                            ready_cnt: Arc<AtomicUsize>,
+                            observed_cnt: Arc<AtomicUsize>| {
             thread::spawn(move || {
                 let mut seen = 0_u64;
                 let mut frames_verified = 0_u64;
+                ready_cnt.fetch_add(1, Ordering::Release);
                 while !flag.load(Ordering::Acquire) {
                     if let Some((seq, p)) = reader.read_latest(seen) {
                         assert!(seq > seen, "non-monotonic ring seq {seq} <= {seen}");
@@ -932,38 +963,38 @@ mod tests {
                         }
                         seen = seq;
                         frames_verified += 1;
+                        if frames_verified == 1 {
+                            observed_cnt.fetch_add(1, Ordering::Release);
+                        }
+                    } else {
+                        thread::yield_now();
                     }
                 }
                 frames_verified
             })
         };
 
-        let h1 = check_reader(r1, done_r1);
-        let h2 = check_reader(r2, done_r2);
+        let h1 = check_reader(r1, done_r1, ready_r1, observed_r1);
+        let h2 = check_reader(r2, done_r2, ready_r2, observed_r2);
+
+        while ready.load(Ordering::Acquire) < 2 {
+            thread::yield_now();
+        }
 
         const TOTAL: u64 = 100_000;
         let t0 = Instant::now();
         for seq in 1..=TOTAL {
-            let mut p = DosoProprioPayload {
-                sequence: seq,
-                monotonic_us: seq * 100,
-                imu_quat_wxyz: [1.0, 0.0, 0.0, 0.0],
-                imu_gyro_rad_s: [0.01, -0.01, 0.02],
-                imu_accel_m_s2: [0.0, 0.0, 9.81 + seq as f64 * 1e-4],
-                joint_online_mask: 0xFFFF,
-                imu_fresh: 1,
-                cms_state: 2,
-                control_owner: 1,
-                motor_output_enabled: 1,
-                ..DosoProprioPayload::default()
-            };
-            for i in 0..DOSO_SHM_JOINTS {
-                p.joint_q[i] = seq as f64 + i as f64 * 0.01;
-                p.joint_tau[i] = -(seq as f64) * 0.5;
-            }
-            writer.publish(&p).unwrap();
+            writer.publish(&make_payload(seq)).unwrap();
         }
         let elapsed = t0.elapsed();
+        let mut tail_seq = TOTAL;
+        let tail_start = Instant::now();
+        while observed.load(Ordering::Acquire) < 2 && tail_start.elapsed() < Duration::from_secs(2)
+        {
+            tail_seq += 1;
+            writer.publish(&make_payload(tail_seq)).unwrap();
+            thread::yield_now();
+        }
         done.store(true, Ordering::Release);
 
         let v1 = h1.join().unwrap();

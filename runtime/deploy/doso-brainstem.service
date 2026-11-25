@@ -1,7 +1,7 @@
 [Unit]
 Description=DOSO Unified Single-Process Rust Brainstem Runtime
-After=network-online.target brainstem-can.service doso-realtime-tune.service
-Wants=network-online.target brainstem-can.service doso-realtime-tune.service
+After=network.target brainstem-can.service doso-realtime-tune.service
+Wants=network.target brainstem-can.service doso-realtime-tune.service
 Conflicts=brainstem.service brainstem-dds-bridge.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
